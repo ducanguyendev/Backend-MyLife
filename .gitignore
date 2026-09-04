@@ -1,0 +1,14 @@
+﻿# Build outputs
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Sensitive Configuration & Database Files
+appsettings.json
+appsettings.*.json
+!appsettings.example.json
+init_db.sql
+Storage/Avatars/*
+!Storage/Avatars/.gitkeep
