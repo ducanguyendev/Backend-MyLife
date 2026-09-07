@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -8,7 +8,7 @@ namespace LoginApp.Services
     public interface IGoogleDriveAvatarService
     {
         Task<(Stream? Stream, string ContentType)> GetAvatarAsync(string email);
-        Task<bool> UploadAvatarAsync(string email, IFormFile file);
+        Task<(bool Success, string? DriveUrl, string? FileId)> UploadAvatarAsync(string email, IFormFile file);
         Task<bool> DeleteAvatarAsync(string email);
     }
 
@@ -68,9 +68,9 @@ namespace LoginApp.Services
             return (null, "image/jpeg");
         }
 
-        public async Task<bool> UploadAvatarAsync(string email, IFormFile file)
+        public async Task<(bool Success, string? DriveUrl, string? FileId)> UploadAvatarAsync(string email, IFormFile file)
         {
-            if (file == null || file.Length == 0) return false;
+            if (file == null || file.Length == 0) return (false, null, null);
 
             var cleanEmail = SanitizeEmail(email);
             var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
@@ -92,6 +92,9 @@ namespace LoginApp.Services
             {
                 await file.CopyToAsync(stream);
             }
+
+            string? driveUrl = null;
+            string? fileId = null;
 
             // 3. Đẩy lên Google Drive thông qua Google Apps Script Webhook
             if (!string.IsNullOrWhiteSpace(_webAppUrl))
@@ -128,6 +131,44 @@ namespace LoginApp.Services
                     var response = await client.PostAsync(_webAppUrl, content);
                     var respContent = await response.Content.ReadAsStringAsync();
                     Console.WriteLine($"[GoogleDriveAvatarService] 🚀 Google Drive Upload Response: {respContent}");
+
+                    if (!string.IsNullOrWhiteSpace(respContent))
+                    {
+                        try
+                        {
+                            using var doc = JsonDocument.Parse(respContent);
+                            var root = doc.RootElement;
+
+                            if (root.TryGetProperty("viewUrl", out var vuProp) && vuProp.ValueKind == JsonValueKind.String)
+                                driveUrl = vuProp.GetString();
+                            else if (root.TryGetProperty("downloadUrl", out var dlProp) && dlProp.ValueKind == JsonValueKind.String)
+                                driveUrl = dlProp.GetString();
+                            else if (root.TryGetProperty("fileUrl", out var fuProp) && fuProp.ValueKind == JsonValueKind.String)
+                                driveUrl = fuProp.GetString();
+                            else if (root.TryGetProperty("url", out var uProp) && uProp.ValueKind == JsonValueKind.String)
+                                driveUrl = uProp.GetString();
+                            else if (root.TryGetProperty("directUrl", out var duProp) && duProp.ValueKind == JsonValueKind.String)
+                                driveUrl = duProp.GetString();
+
+                            if (root.TryGetProperty("fileId", out var idProp) && idProp.ValueKind == JsonValueKind.String)
+                                fileId = idProp.GetString();
+                            else if (root.TryGetProperty("id", out var idProp2) && idProp2.ValueKind == JsonValueKind.String)
+                                fileId = idProp2.GetString();
+
+                            // Nếu có fileId mà chưa có driveUrl thì tạo link Google Drive chuẩn
+                            if (string.IsNullOrEmpty(driveUrl) && !string.IsNullOrEmpty(fileId))
+                            {
+                                driveUrl = $"https://drive.google.com/file/d/{fileId}/view";
+                            }
+                        }
+                        catch
+                        {
+                            if (respContent.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                            {
+                                driveUrl = respContent.Trim();
+                            }
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -135,7 +176,7 @@ namespace LoginApp.Services
                 }
             }
 
-            return true;
+            return (true, driveUrl, fileId);
         }
 
         public async Task<bool> DeleteAvatarAsync(string email)

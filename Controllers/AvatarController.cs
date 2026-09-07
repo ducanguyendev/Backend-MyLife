@@ -64,28 +64,31 @@ namespace LoginApp.Controllers
             if (!allowedMimeTypes.Contains(file.ContentType.ToLowerInvariant()))
                 return BadRequest(new { message = "Chỉ chấp nhận các định dạng ảnh JPG, PNG, WEBP, GIF." });
 
-            var success = await _avatarService.UploadAvatarAsync(email, file);
+            var (success, driveUrl, fileId) = await _avatarService.UploadAvatarAsync(email, file);
             if (!success)
                 return StatusCode(500, new { message = "Không thể tải ảnh lên. Vui lòng thử lại." });
 
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            var avatarUrl = $"/api/avatar/{Uri.EscapeDataString(email)}?t={timestamp}";
+            // Ưu tiên lưu URL trực tiếp của Google Drive nếu có, nếu không sẽ lưu relative endpoint
+            var finalAvatarUrl = !string.IsNullOrEmpty(driveUrl) 
+                ? driveUrl 
+                : $"/api/avatar/{Uri.EscapeDataString(email)}?t={timestamp}";
 
             // Cập nhật đường dẫn file ảnh avatar vào cơ sở dữ liệu PostgreSQL
             var normalizedEmail = email.Trim().ToLowerInvariant();
             var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
             if (user != null)
             {
-                user.AvatarUrl = avatarUrl;
+                user.AvatarUrl = finalAvatarUrl;
                 user.UpdatedAt = DateTime.UtcNow;
                 await _db.SaveChangesAsync();
-                Console.WriteLine($"[AVATAR] 💾 Đã lưu avatarUrl vào DB cho user: {normalizedEmail} -> {avatarUrl}");
+                Console.WriteLine($"[AVATAR] 💾 Đã lưu avatarUrl vào DB cho user: {normalizedEmail} -> {finalAvatarUrl}");
             }
 
             return Ok(new
             {
                 message = "Cập nhật ảnh đại diện thành công!",
-                avatarUrl
+                avatarUrl = finalAvatarUrl
             });
         }
 
