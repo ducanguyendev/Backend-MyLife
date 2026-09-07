@@ -69,9 +69,10 @@ namespace LoginApp.Controllers
                 return StatusCode(500, new { message = "Không thể tải ảnh lên. Vui lòng thử lại." });
 
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            // Ưu tiên lưu URL trực tiếp của Google Drive nếu có, nếu không sẽ lưu relative endpoint
-            var finalAvatarUrl = !string.IsNullOrEmpty(driveUrl) 
-                ? driveUrl 
+            // Lưu URL Google Drive chuẩn kèm timestamp để URL trong DB luôn thay đổi theo mỗi lần đổi ảnh
+            var baseDriveUrl = !string.IsNullOrEmpty(driveUrl) ? driveUrl.Split('?')[0] : "";
+            var finalAvatarUrl = !string.IsNullOrEmpty(baseDriveUrl) 
+                ? $"{baseDriveUrl}?t={timestamp}" 
                 : $"/api/avatar/{Uri.EscapeDataString(email)}?t={timestamp}";
 
             // Cập nhật đường dẫn file ảnh avatar vào cơ sở dữ liệu PostgreSQL
