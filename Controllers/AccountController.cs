@@ -197,15 +197,21 @@ namespace LoginApp.Controllers
                     return BadRequest(new { message = "Ngày sinh không hợp lệ (độ tuổi vượt quá 120 tuổi)." });
                 }
 
-                // 4. Kiểm tra email đã tồn tại chưa
+                // 4. Kiểm tra định dạng đuôi Gmail (@gmail.com)
+                if (!normalizedEmail.EndsWith("@gmail.com"))
+                {
+                    return BadRequest(new { message = "Hệ thống chỉ chấp nhận địa chỉ email Gmail (@gmail.com)." });
+                }
+
+                // 5. Kiểm tra email đã tồn tại chưa
                 var exists = await _db.Users.AnyAsync(u => u.Email == normalizedEmail);
                 if (exists)
                     return Conflict(new { message = "Email này đã được đăng ký. Vui lòng sử dụng email khác hoặc đăng nhập." });
 
-                // 5. Băm mật khẩu bằng BCrypt (cost factor 11)
+                // 6. Băm mật khẩu bằng BCrypt (cost factor 11)
                 var passwordHash = BCrypt.Net.BCrypt.HashPassword(model.Password, workFactor: 11);
 
-                // 6. Tạo User mới
+                // 7. Tạo User mới
                 var newUser = new User
                 {
                     Id = Guid.NewGuid(),

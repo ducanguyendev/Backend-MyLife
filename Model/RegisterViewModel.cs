@@ -23,6 +23,7 @@ namespace LoginApp.Model
 
         [Required(ErrorMessage = "Vui lòng nhập địa chỉ email.")]
         [EmailAddress(ErrorMessage = "Địa chỉ email không đúng định dạng chuẩn.")]
+        [RegularExpression(@"^[a-zA-Z0-9._%+-]+@gmail\.com$", ErrorMessage = "Địa chỉ email phải có định dạng Gmail hợp lệ (@gmail.com).")]
         [MaxLength(254, ErrorMessage = "Email không được vượt quá 254 ký tự.")]
         public string Email { get; set; } = string.Empty;
 
