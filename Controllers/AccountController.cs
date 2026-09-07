@@ -156,7 +156,14 @@ namespace LoginApp.Controllers
         public async Task<IActionResult> Register([FromBody] RegisterViewModel model)
         {
             if (!ModelState.IsValid)
-                return BadRequest(ModelState);
+            {
+                var firstError = ModelState.Values
+                    .SelectMany(v => v.Errors)
+                    .Select(e => e.ErrorMessage)
+                    .FirstOrDefault(msg => !string.IsNullOrEmpty(msg));
+
+                return BadRequest(new { message = firstError ?? "Dữ liệu đăng ký không hợp lệ.", errors = ModelState });
+            }
 
             try
             {
