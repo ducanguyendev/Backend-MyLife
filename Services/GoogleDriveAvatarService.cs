@@ -87,27 +87,25 @@ namespace LoginApp.Services
                 if (File.Exists(oldLocal)) File.Delete(oldLocal);
             }
 
-            // 2. Lưu vào local cache
-            using (var stream = new FileStream(localPath, FileMode.Create))
+            // 2. Đọc toàn bộ byte của file một lần duy nhất
+            byte[] fileBytes;
+            using (var ms = new MemoryStream())
             {
-                await file.CopyToAsync(stream);
+                await file.CopyToAsync(ms);
+                fileBytes = ms.ToArray();
             }
+
+            // Lưu vào local cache
+            await File.WriteAllBytesAsync(localPath, fileBytes);
 
             string? driveUrl = null;
             string? fileId = null;
 
             // 3. Đẩy lên Google Drive thông qua Google Apps Script Webhook
-            if (!string.IsNullOrWhiteSpace(_webAppUrl))
+            if (!string.IsNullOrWhiteSpace(_webAppUrl) && fileBytes.Length > 0)
             {
                 try
                 {
-                    byte[] fileBytes;
-                    using (var ms = new MemoryStream())
-                    {
-                        await file.CopyToAsync(ms);
-                        fileBytes = ms.ToArray();
-                    }
-
                     var base64 = Convert.ToBase64String(fileBytes);
                     var payloadObj = new
                     {
