@@ -176,20 +176,45 @@ namespace LoginApp.Controllers
                 if (model.Password != model.ConfirmPassword)
                     return BadRequest(new { message = "Mật khẩu nhập lại không khớp. Vui lòng kiểm tra lại." });
 
-                // 3. Kiểm tra email đã tồn tại chưa
+                // 3. Kiểm tra ngày sinh & độ tuổi hợp lệ (6 - 120 tuổi)
+                if (!model.DateOfBirth.HasValue)
+                {
+                    return BadRequest(new { message = "Vui lòng chọn ngày sinh." });
+                }
+                var today = DateOnly.FromDateTime(DateTime.UtcNow);
+                if (model.DateOfBirth.Value > today)
+                {
+                    return BadRequest(new { message = "Ngày sinh không hợp lệ (không được lớn hơn ngày hiện tại)." });
+                }
+                var age = today.Year - model.DateOfBirth.Value.Year;
+                if (model.DateOfBirth.Value > today.AddYears(-age)) age--;
+                if (age < 6)
+                {
+                    return BadRequest(new { message = "Bạn phải từ đủ 6 tuổi trở lên để đăng ký tài khoản." });
+                }
+                if (age > 120)
+                {
+                    return BadRequest(new { message = "Ngày sinh không hợp lệ (độ tuổi vượt quá 120 tuổi)." });
+                }
+
+                // 4. Kiểm tra email đã tồn tại chưa
                 var exists = await _db.Users.AnyAsync(u => u.Email == normalizedEmail);
                 if (exists)
                     return Conflict(new { message = "Email này đã được đăng ký. Vui lòng sử dụng email khác hoặc đăng nhập." });
 
-                // 4. Băm mật khẩu bằng BCrypt (cost factor 11)
+                // 5. Băm mật khẩu bằng BCrypt (cost factor 11)
                 var passwordHash = BCrypt.Net.BCrypt.HashPassword(model.Password, workFactor: 11);
 
-                // 5. Tạo User mới
+                // 6. Tạo User mới
                 var newUser = new User
                 {
                     Id = Guid.NewGuid(),
                     Email = normalizedEmail,
                     PasswordHash = passwordHash,
+                    FullName = model.FullName.Trim(),
+                    PhoneNumber = model.PhoneNumber.Trim(),
+                    Gender = model.Gender.Trim(),
+                    DateOfBirth = model.DateOfBirth.Value,
                     AvatarUrl = null,
                     AuthProvider = 0, // 0 = LOCAL
                     IsActive = true,
@@ -199,7 +224,7 @@ namespace LoginApp.Controllers
                 };
                 _db.Users.Add(newUser);
 
-                // 6. Gán vai trò USER mặc định (role_id = 2)
+                // 7. Gán vai trò USER mặc định (role_id = 2)
                 var userRole = await _db.Roles.FirstOrDefaultAsync(r => r.Name == "USER");
                 if (userRole != null)
                 {
@@ -210,7 +235,7 @@ namespace LoginApp.Controllers
                     });
                 }
 
-                // 7. Ghi log vào login_logs
+                // 8. Ghi log vào login_logs
                 _db.LoginLogs.Add(new LoginLog
                 {
                     UserId = newUser.Id,
@@ -222,7 +247,7 @@ namespace LoginApp.Controllers
 
                 await _db.SaveChangesAsync();
 
-                Console.WriteLine($"[INFO] Tài khoản mới đã được đăng ký: {normalizedEmail}");
+                Console.WriteLine($"[INFO] Tài khoản mới đã được đăng ký: {normalizedEmail} (Họ tên: {newUser.FullName}, SĐT: {newUser.PhoneNumber})");
 
                 return StatusCode(201, new
                 {
@@ -457,7 +482,11 @@ namespace LoginApp.Controllers
                 message = "Xác thực phiên thành công (200 OK)!",
                 id = user.Id,
                 email = user.Email,
-                name = user.Email.Split('@')[0],
+                name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
+                fullName = user.FullName,
+                phoneNumber = user.PhoneNumber,
+                gender = user.Gender,
+                dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
                 avatarUrl = user.AvatarUrl,
                 authProvider = user.AuthProvider,
                 authProviderName = user.AuthProvider == 1 ? "GOOGLE" : "LOCAL",
@@ -635,6 +664,10 @@ namespace LoginApp.Controllers
                 {
                     id = u.Id,
                     email = u.Email,
+                    fullName = u.FullName,
+                    phoneNumber = u.PhoneNumber,
+                    gender = u.Gender,
+                    dateOfBirth = u.DateOfBirth.HasValue ? u.DateOfBirth.Value.ToString("yyyy-MM-dd") : null,
                     role = u.UserRoles.FirstOrDefault() != null ? u.UserRoles.First().Role.Name : "USER",
                     authProvider = u.AuthProvider,
                     authProviderName = u.AuthProvider == 1 ? "GOOGLE" : "LOCAL",

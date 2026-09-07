@@ -1,3 +1,4 @@
+using System;
 using System.ComponentModel.DataAnnotations;
 
 namespace LoginApp.Model
@@ -8,6 +9,17 @@ namespace LoginApp.Model
         [StringLength(50, MinimumLength = 2, ErrorMessage = "Họ và tên phải có độ dài từ 2 đến 50 ký tự.")]
         [RegularExpression(@"^[\p{L}\s]+$", ErrorMessage = "Họ và tên không được chứa số hoặc ký tự đặc biệt.")]
         public string FullName { get; set; } = string.Empty;
+
+        [Required(ErrorMessage = "Vui lòng nhập số điện thoại.")]
+        [RegularExpression(@"^(0[3|5|7|8|9])[0-9]{8}$", ErrorMessage = "Số điện thoại không hợp lệ (Phải là số điện thoại Việt Nam gồm 10 chữ số, ví dụ: 0912345678).")]
+        public string PhoneNumber { get; set; } = string.Empty;
+
+        [Required(ErrorMessage = "Vui lòng chọn giới tính.")]
+        [RegularExpression(@"^(Nam|Nữ|Khác)$", ErrorMessage = "Giới tính không hợp lệ. Vui lòng chọn Nam, Nữ hoặc Khác.")]
+        public string Gender { get; set; } = string.Empty;
+
+        [Required(ErrorMessage = "Vui lòng chọn ngày sinh.")]
+        public DateOnly? DateOfBirth { get; set; }
 
         [Required(ErrorMessage = "Vui lòng nhập địa chỉ email.")]
         [EmailAddress(ErrorMessage = "Địa chỉ email không đúng định dạng chuẩn.")]
@@ -25,3 +37,4 @@ namespace LoginApp.Model
         public string ConfirmPassword { get; set; } = string.Empty;
     }
 }
+

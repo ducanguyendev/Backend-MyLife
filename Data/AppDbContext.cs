@@ -30,6 +30,10 @@ namespace LoginApp.Data
                 entity.Property(e => e.Email).HasColumnName("email").HasMaxLength(255).IsRequired();
                 entity.HasIndex(e => e.Email).IsUnique();
                 entity.Property(e => e.PasswordHash).HasColumnName("password_hash").HasMaxLength(255).IsRequired();
+                entity.Property(e => e.FullName).HasColumnName("full_name").HasMaxLength(100);
+                entity.Property(e => e.PhoneNumber).HasColumnName("phone_number").HasMaxLength(20);
+                entity.Property(e => e.Gender).HasColumnName("gender").HasMaxLength(20);
+                entity.Property(e => e.DateOfBirth).HasColumnName("date_of_birth");
                 entity.Property(e => e.AvatarUrl).HasColumnName("avatar_url").HasColumnType("text");
                 entity.Property(e => e.AuthProvider).HasColumnName("auth_provider").HasDefaultValue(0);
                 entity.Property(e => e.IsActive).HasColumnName("is_active").HasDefaultValue(true);

@@ -125,8 +125,15 @@ using (var scope = app.Services.CreateScope())
     try
     {
         await db.Database.EnsureCreatedAsync();
+        // Đảm bảo các cột mới tồn tại trong bảng users của PostgreSQL
+        await db.Database.ExecuteSqlRawAsync(@"
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(100);
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20);
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(20);
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS date_of_birth DATE;
+        ");
         await db.SeedDataAsync();
-        Console.WriteLine("[DATABASE] ✅ Kết nối PostgreSQL và Seed dữ liệu khởi tạo thành công!");
+        Console.WriteLine("[DATABASE] ✅ Kết nối PostgreSQL, kiểm tra Schema và Seed dữ liệu khởi tạo thành công!");
     }
     catch (Exception ex)
     {

@@ -8,6 +8,10 @@ namespace LoginApp.Entities
         public Guid Id { get; set; } = Guid.NewGuid();
         public string Email { get; set; } = string.Empty;
         public string PasswordHash { get; set; } = string.Empty;
+        public string? FullName { get; set; }
+        public string? PhoneNumber { get; set; }
+        public string? Gender { get; set; }
+        public DateOnly? DateOfBirth { get; set; }
         public string? AvatarUrl { get; set; }
         public int AuthProvider { get; set; } = 0; // 0 = LOCAL, 1 = GOOGLE
         public bool IsActive { get; set; } = true;
