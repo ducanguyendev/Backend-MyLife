@@ -1,6 +1,8 @@
+using LoginApp.Data;
 using LoginApp.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 
 namespace LoginApp.Controllers
@@ -10,10 +12,12 @@ namespace LoginApp.Controllers
     public class AvatarController : ControllerBase
     {
         private readonly IGoogleDriveAvatarService _avatarService;
+        private readonly AppDbContext _db;
 
-        public AvatarController(IGoogleDriveAvatarService avatarService)
+        public AvatarController(IGoogleDriveAvatarService avatarService, AppDbContext db)
         {
             _avatarService = avatarService;
+            _db = db;
         }
 
         /// <summary>
@@ -37,7 +41,7 @@ namespace LoginApp.Controllers
         }
 
         /// <summary>
-        /// Tải lên ảnh đại diện mới (Không lưu vào Database)
+        /// Tải lên ảnh đại diện mới và lưu đường dẫn vào cơ sở dữ liệu
         /// </summary>
         [Authorize]
         [HttpPost("upload")]
@@ -67,6 +71,17 @@ namespace LoginApp.Controllers
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var avatarUrl = $"/api/avatar/{Uri.EscapeDataString(email)}?t={timestamp}";
 
+            // Cập nhật đường dẫn file ảnh avatar vào cơ sở dữ liệu PostgreSQL
+            var normalizedEmail = email.Trim().ToLowerInvariant();
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
+            if (user != null)
+            {
+                user.AvatarUrl = avatarUrl;
+                user.UpdatedAt = DateTime.UtcNow;
+                await _db.SaveChangesAsync();
+                Console.WriteLine($"[AVATAR] 💾 Đã lưu avatarUrl vào DB cho user: {normalizedEmail} -> {avatarUrl}");
+            }
+
             return Ok(new
             {
                 message = "Cập nhật ảnh đại diện thành công!",
@@ -75,7 +90,7 @@ namespace LoginApp.Controllers
         }
 
         /// <summary>
-        /// Xóa ảnh đại diện
+        /// Xóa ảnh đại diện và cập nhật DB về null
         /// </summary>
         [Authorize]
         [HttpDelete]
@@ -88,6 +103,17 @@ namespace LoginApp.Controllers
                 return Unauthorized(new { message = "Phiên làm việc không hợp lệ." });
 
             await _avatarService.DeleteAvatarAsync(email);
+
+            // Cập nhật gỡ bỏ đường dẫn avatar trong cơ sở dữ liệu PostgreSQL
+            var normalizedEmail = email.Trim().ToLowerInvariant();
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
+            if (user != null)
+            {
+                user.AvatarUrl = null;
+                user.UpdatedAt = DateTime.UtcNow;
+                await _db.SaveChangesAsync();
+                Console.WriteLine($"[AVATAR] 🗑️ Đã xóa avatarUrl trong DB cho user: {normalizedEmail}");
+            }
 
             return Ok(new { message = "Đã xóa ảnh đại diện thành công!" });
         }

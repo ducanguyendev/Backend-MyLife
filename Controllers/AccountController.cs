@@ -137,7 +137,9 @@ namespace LoginApp.Controllers
                 return Ok(new
                 {
                     message = "Đăng nhập thành công!",
+                    email = user.Email,
                     role = primaryRole,
+                    avatarUrl = user.AvatarUrl,
                     accessToken,
                     refreshToken,
                     expiresIn = 30
