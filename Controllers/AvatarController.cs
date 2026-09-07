@@ -27,15 +27,17 @@ namespace LoginApp.Controllers
 
             var (stream, contentType) = await _avatarService.GetAvatarAsync(email);
             if (stream == null)
-                return NotFound(new { message = "Chưa có ảnh đại diện trên Google Drive." });
+                return NotFound(new { message = "Chưa có ảnh đại diện." });
 
-            // Thêm Cache-Control để tối ưu tốc độ tải trang
-            Response.Headers.Append("Cache-Control", "public, max-age=3600");
+            // Không lưu cache cứng ở trình duyệt để cập nhật/xóa avatar tức thì
+            Response.Headers.Append("Cache-Control", "no-cache, no-store, must-revalidate");
+            Response.Headers.Append("Pragma", "no-cache");
+            Response.Headers.Append("Expires", "0");
             return File(stream, contentType);
         }
 
         /// <summary>
-        /// Tải lên ảnh đại diện mới lên Google Drive (Không lưu vào Database)
+        /// Tải lên ảnh đại diện mới (Không lưu vào Database)
         /// </summary>
         [Authorize]
         [HttpPost("upload")]
@@ -60,7 +62,7 @@ namespace LoginApp.Controllers
 
             var success = await _avatarService.UploadAvatarAsync(email, file);
             if (!success)
-                return StatusCode(500, new { message = "Không thể tải ảnh lên Google Drive. Vui lòng thử lại." });
+                return StatusCode(500, new { message = "Không thể tải ảnh lên. Vui lòng thử lại." });
 
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var avatarUrl = $"/api/avatar/{Uri.EscapeDataString(email)}?t={timestamp}";
@@ -73,7 +75,7 @@ namespace LoginApp.Controllers
         }
 
         /// <summary>
-        /// Xóa ảnh đại diện khỏi Google Drive
+        /// Xóa ảnh đại diện
         /// </summary>
         [Authorize]
         [HttpDelete]
@@ -87,7 +89,7 @@ namespace LoginApp.Controllers
 
             await _avatarService.DeleteAvatarAsync(email);
 
-            return Ok(new { message = "Đã xóa ảnh đại diện khỏi Google Drive thành công!" });
+            return Ok(new { message = "Đã xóa ảnh đại diện thành công!" });
         }
     }
 }
