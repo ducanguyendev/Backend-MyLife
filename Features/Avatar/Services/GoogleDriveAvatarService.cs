@@ -1,13 +1,11 @@
-using System.IO;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 
-namespace LoginApp.Services
+namespace MyLife.Features.Avatar.Services
 {
     public interface IGoogleDriveAvatarService
     {
-        Task<(Stream? Stream, string ContentType)> GetAvatarAsync(string email);
         Task<(bool Success, string? DriveUrl, string? FileId)> UploadAvatarAsync(string email, IFormFile file);
         Task<bool> DeleteAvatarAsync(string email);
     }
@@ -15,27 +13,16 @@ namespace LoginApp.Services
     public class GoogleDriveAvatarService : IGoogleDriveAvatarService
     {
         private readonly IConfiguration _config;
-        private readonly IWebHostEnvironment _env;
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly string _webAppUrl;
-        private readonly string _localCacheDir;
 
         public GoogleDriveAvatarService(
             IConfiguration config, 
-            IWebHostEnvironment env,
             IHttpClientFactory httpClientFactory)
         {
             _config = config;
-            _env = env;
             _httpClientFactory = httpClientFactory;
             _webAppUrl = _config["GoogleDrive:WebAppUrl"] ?? "";
-
-            var cacheSubDir = _config["GoogleDrive:LocalCachePath"] ?? "Storage/Avatars";
-            _localCacheDir = Path.Combine(_env.ContentRootPath, cacheSubDir);
-            if (!Directory.Exists(_localCacheDir))
-            {
-                Directory.CreateDirectory(_localCacheDir);
-            }
         }
 
         private string SanitizeEmail(string email)
@@ -43,51 +30,13 @@ namespace LoginApp.Services
             return email.Trim().ToLowerInvariant().Replace("/", "_").Replace("\\", "_");
         }
 
-        public async Task<(Stream? Stream, string ContentType)> GetAvatarAsync(string email)
-        {
-            var cleanEmail = SanitizeEmail(email);
-
-            // 1. Kiểm tra Local Cache trước để phản hồi siêu nhanh
-            var extensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
-            foreach (var ext in extensions)
-            {
-                var localFile = Path.Combine(_localCacheDir, cleanEmail + ext);
-                if (File.Exists(localFile))
-                {
-                    var memoryStream = new MemoryStream();
-                    using (var fs = new FileStream(localFile, FileMode.Open, FileAccess.Read, FileShare.Read))
-                    {
-                        await fs.CopyToAsync(memoryStream);
-                    }
-                    memoryStream.Position = 0;
-                    var ct = ext == ".png" ? "image/png" : ext == ".webp" ? "image/webp" : "image/jpeg";
-                    return (memoryStream, ct);
-                }
-            }
-
-            return (null, "image/jpeg");
-        }
-
         public async Task<(bool Success, string? DriveUrl, string? FileId)> UploadAvatarAsync(string email, IFormFile file)
         {
             if (file == null || file.Length == 0) return (false, null, null);
 
             var cleanEmail = SanitizeEmail(email);
-            var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
-            if (string.IsNullOrEmpty(ext)) ext = ".jpg";
 
-            var fileName = $"{cleanEmail}{ext}";
-            var localPath = Path.Combine(_localCacheDir, fileName);
-
-            // 1. Xóa các file cũ của email này trong cache
-            var extensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
-            foreach (var oldExt in extensions)
-            {
-                var oldLocal = Path.Combine(_localCacheDir, cleanEmail + oldExt);
-                if (File.Exists(oldLocal)) File.Delete(oldLocal);
-            }
-
-            // 2. Đọc toàn bộ byte của file một lần duy nhất
+            // 1. Đọc toàn bộ byte của file
             byte[] fileBytes;
             using (var ms = new MemoryStream())
             {
@@ -95,13 +44,10 @@ namespace LoginApp.Services
                 fileBytes = ms.ToArray();
             }
 
-            // Lưu vào local cache
-            await File.WriteAllBytesAsync(localPath, fileBytes);
-
             string? driveUrl = null;
             string? fileId = null;
 
-            // 3. Đẩy lên Google Drive thông qua Google Apps Script Webhook
+            // 2. Đẩy trực tiếp lên Google Drive thông qua Google Apps Script Webhook
             if (!string.IsNullOrWhiteSpace(_webAppUrl) && fileBytes.Length > 0)
             {
                 try
@@ -181,15 +127,7 @@ namespace LoginApp.Services
         {
             var cleanEmail = SanitizeEmail(email);
 
-            // 1. Xóa local cache
-            var extensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
-            foreach (var ext in extensions)
-            {
-                var localFile = Path.Combine(_localCacheDir, cleanEmail + ext);
-                if (File.Exists(localFile)) File.Delete(localFile);
-            }
-
-            // 2. Gửi lệnh xóa file trên Google Drive
+            // Gửi lệnh xóa file trên Google Drive
             if (!string.IsNullOrWhiteSpace(_webAppUrl))
             {
                 try

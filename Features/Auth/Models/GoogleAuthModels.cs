@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace LoginApp.Model
+namespace MyLife.Features.Auth.Models
 {
     /// <summary>
     /// Request từ Client gửi lên chứa Authorization Code của Google

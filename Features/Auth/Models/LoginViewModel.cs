@@ -1,6 +1,6 @@
 using System.ComponentModel.DataAnnotations;
 
-namespace LoginApp.Model
+namespace MyLife.Features.Auth.Models
 {
     public class LoginViewModel
     {

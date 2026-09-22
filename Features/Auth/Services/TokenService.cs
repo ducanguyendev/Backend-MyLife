@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.IdentityModel.Tokens;
 
-namespace LoginApp.Services
+namespace MyLife.Features.Auth.Services
 {
     public interface ITokenService
     {

@@ -1,6 +1,6 @@
-﻿using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations;
 
-namespace LoginApp.Model
+namespace MyLife.Features.User.Models
 {
     public class ChangePasswordViewModel
     {

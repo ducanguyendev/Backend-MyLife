@@ -1,14 +1,17 @@
 using Microsoft.AspNetCore.Mvc;
-using LoginApp.Data;
-using LoginApp.Entities;
-using LoginApp.Model;
-using LoginApp.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
-
-namespace LoginApp.Controllers
+using System.ComponentModel.DataAnnotations;
+using MyLife.Shared.Data;
+using MyLife.Shared.Entities;
+using MyLife.Features.Auth.Models;
+using MyLife.Features.Auth.Services;
+using MyLife.Features.User.Models;
+namespace MyLife.Features.Auth.Controllers
 {
+    using User = MyLife.Shared.Entities.User;
+
     [ApiController]
     [Route("api/")]
     public class AccountController : ControllerBase
@@ -123,7 +126,7 @@ namespace LoginApp.Controllers
                     Token = refreshToken,
                     IpAddress = clientIp,
                     UserAgent = userAgent,
-                    ExpiresAt = DateTime.UtcNow.AddMinutes(2), // Refresh token có hạn 2 phút
+                    ExpiresAt = DateTime.UtcNow.AddMinutes(_configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes", 10080)),
                     IsRevoked = false,
                     CreatedAt = DateTime.UtcNow
                 };
@@ -133,13 +136,37 @@ namespace LoginApp.Controllers
 
                 SetAuthCookies(accessToken, refreshToken, model.RememberMe, 120);
 
+                var userDto = new
+                {
+                    id = user.Id,
+                    email = user.Email,
+                    fullName = user.FullName,
+                    name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
+                    phoneNumber = user.PhoneNumber,
+                    gender = user.Gender,
+                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
+                    avatarUrl = user.AvatarUrl,
+                    role = primaryRole,
+                    authProvider = user.AuthProvider,
+                    isActive = user.IsActive
+                };
+
                 // Tuyệt đối không trả về password hay password hash
                 return Ok(new
                 {
                     message = "Đăng nhập thành công!",
+                    user = userDto,
+                    id = user.Id,
                     email = user.Email,
+                    fullName = user.FullName,
+                    name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
+                    phoneNumber = user.PhoneNumber,
+                    gender = user.Gender,
+                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
                     role = primaryRole,
-                    avatarUrl = user.AvatarUrl,
+                    avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
+                    authProvider = user.AuthProvider,
+                    isActive = user.IsActive,
                     accessToken,
                     refreshToken,
                     expiresIn = 30
@@ -214,7 +241,6 @@ namespace LoginApp.Controllers
                 // 7. Tạo User mới
                 var newUser = new User
                 {
-                    Id = Guid.NewGuid(),
                     Email = normalizedEmail,
                     PasswordHash = passwordHash,
                     FullName = model.FullName.Trim(),
@@ -335,15 +361,44 @@ namespace LoginApp.Controllers
                 }
                 else
                 {
-                    // Chế độ phát triển / Nhập Gmail trực tiếp khi chưa điền Google Secret:
-                    if (request.Code.Contains("@"))
+                    // 1. Hỗ trợ giải mã Google ID Token (JWT định dạng 3 phần từ Google Sign-In SDK di động)
+                    if (request.Code.Contains(".") && request.Code.Split('.').Length == 3)
                     {
-                        userEmail = request.Code.Trim().ToLowerInvariant();
-                        userName = userEmail.Split('@')[0];
+                        try
+                        {
+                            var parts = request.Code.Split('.');
+                            var base64 = parts[1].Replace('-', '+').Replace('_', '/');
+                            switch (base64.Length % 4)
+                            {
+                                case 2: base64 += "=="; break;
+                                case 3: base64 += "="; break;
+                            }
+                            var payloadBytes = Convert.FromBase64String(base64);
+                            var payloadJson = System.Text.Encoding.UTF8.GetString(payloadBytes);
+                            using var doc = System.Text.Json.JsonDocument.Parse(payloadJson);
+                            var root = doc.RootElement;
+                            if (root.TryGetProperty("email", out var emailProp)) userEmail = emailProp.GetString();
+                            if (root.TryGetProperty("name", out var nameProp)) userName = nameProp.GetString();
+                            if (root.TryGetProperty("picture", out var picProp)) userPicture = picProp.GetString();
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[WARN] Lỗi đọc Google ID Token: {ex.Message}");
+                        }
                     }
-                    else
+
+                    // 2. Chế độ phát triển / Nhập Gmail trực tiếp
+                    if (string.IsNullOrWhiteSpace(userEmail))
                     {
-                        return BadRequest(new { message = "Chưa cấu hình Google OAuth Client Secret. Vui lòng cung cấp địa chỉ Gmail hợp lệ hoặc cấu hình Client Secret trong appsettings.json!" });
+                        if (request.Code.Contains("@"))
+                        {
+                            userEmail = request.Code.Trim().ToLowerInvariant();
+                            userName = userEmail.Split('@')[0];
+                        }
+                        else
+                        {
+                            return BadRequest(new { message = "Không thể xác thực mã Google. Vui lòng thử lại hoặc đăng nhập bằng tài khoản." });
+                        }
                     }
                 }
 
@@ -364,7 +419,6 @@ namespace LoginApp.Controllers
                 {
                     user = new User
                     {
-                        Id = Guid.NewGuid(),
                         Email = normalizedEmail,
                         PasswordHash = "GOOGLE_OAUTH",
                         AvatarUrl = userPicture,
@@ -437,7 +491,7 @@ namespace LoginApp.Controllers
                     Token = refreshToken,
                     IpAddress = clientIp,
                     UserAgent = userAgent,
-                    ExpiresAt = DateTime.UtcNow.AddMinutes(2),
+                    ExpiresAt = DateTime.UtcNow.AddMinutes(_configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes", 10080)),
                     IsRevoked = false,
                     CreatedAt = DateTime.UtcNow
                 };
@@ -447,12 +501,36 @@ namespace LoginApp.Controllers
 
                 SetAuthCookies(accessToken, refreshToken, true, 120);
 
+                var googleUserDto = new
+                {
+                    id = user.Id,
+                    email = user.Email,
+                    fullName = user.FullName,
+                    name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
+                    phoneNumber = user.PhoneNumber,
+                    gender = user.Gender,
+                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
+                    avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
+                    role = googleUserRole,
+                    authProvider = user.AuthProvider,
+                    isActive = user.IsActive
+                };
+
                 return Ok(new
                 {
                     message = "Đăng nhập Google thành công!",
+                    user = googleUserDto,
+                    id = user.Id,
                     email = user.Email,
+                    fullName = user.FullName,
+                    name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
+                    phoneNumber = user.PhoneNumber,
+                    gender = user.Gender,
+                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
                     role = googleUserRole,
-                    avatarUrl = user.AvatarUrl,
+                    avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
+                    authProvider = user.AuthProvider,
+                    isActive = user.IsActive,
                     accessToken,
                     refreshToken,
                     expiresIn = 30
@@ -493,7 +571,7 @@ namespace LoginApp.Controllers
                 phoneNumber = user.PhoneNumber,
                 gender = user.Gender,
                 dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
-                avatarUrl = user.AvatarUrl,
+                avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
                 authProvider = user.AuthProvider,
                 authProviderName = user.AuthProvider == 1 ? "GOOGLE" : "LOCAL",
                 role = primaryRole,
@@ -501,6 +579,88 @@ namespace LoginApp.Controllers
                 verifiedAt = user.VerifiedAt,
                 isAuthenticated = true,
                 checkedAt = DateTime.UtcNow.ToString("HH:mm:ss")
+            });
+        }
+
+        private static string? NormalizeAvatarUrl(string? url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return url;
+            if (url.Contains("drive.google.com/file/d/"))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(url, @"/file/d/([a-zA-Z0-9_-]+)");
+                if (match.Success)
+                {
+                    var fileId = match.Groups[1].Value;
+                    var tParam = url.Contains("?t=") ? url.Substring(url.IndexOf("?t=")) : "";
+                    return $"https://lh3.googleusercontent.com/d/{fileId}{tParam}";
+                }
+            }
+            return url;
+        }
+
+        public class UpdateProfileViewModel
+        {
+            [Required(ErrorMessage = "Vui lòng nhập họ và tên.")]
+            [StringLength(50, MinimumLength = 2, ErrorMessage = "Họ và tên phải có độ dài từ 2 đến 50 ký tự.")]
+            public string FullName { get; set; } = string.Empty;
+
+            [Required(ErrorMessage = "Vui lòng nhập số điện thoại.")]
+            [RegularExpression(@"^(0[3|5|7|8|9])[0-9]{8}$", ErrorMessage = "Số điện thoại không hợp lệ (Phải gồm 10 số, bắt đầu bằng 03, 05, 07, 08, 09).")]
+            public string PhoneNumber { get; set; } = string.Empty;
+
+            [Required(ErrorMessage = "Vui lòng chọn giới tính.")]
+            [RegularExpression(@"^(Nam|Nữ|Khác)$", ErrorMessage = "Giới tính không hợp lệ. Vui lòng chọn Nam, Nữ hoặc Khác.")]
+            public string Gender { get; set; } = string.Empty;
+
+            [Required(ErrorMessage = "Vui lòng chọn ngày sinh.")]
+            public DateOnly? DateOfBirth { get; set; }
+        }
+
+        [Authorize]
+        [HttpPut("me/profile")]
+        public async Task<IActionResult> UpdateProfile([FromBody] UpdateProfileViewModel model)
+        {
+            if (!ModelState.IsValid)
+            {
+                var firstError = ModelState.Values
+                    .SelectMany(v => v.Errors)
+                    .Select(e => e.ErrorMessage)
+                    .FirstOrDefault(msg => !string.IsNullOrEmpty(msg));
+                return BadRequest(new { message = firstError ?? "Dữ liệu cập nhật không hợp lệ." });
+            }
+
+            var email = User.FindFirstValue(ClaimTypes.Email);
+            if (string.IsNullOrEmpty(email))
+                return Unauthorized(new { message = "Phiên làm việc không hợp lệ." });
+
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
+            if (user == null || !user.IsActive)
+                return Unauthorized(new { message = "Người dùng không tồn tại hoặc đã bị khóa." });
+
+            user.FullName = model.FullName.Trim();
+            user.PhoneNumber = model.PhoneNumber.Trim();
+            user.Gender = model.Gender.Trim();
+            user.DateOfBirth = model.DateOfBirth;
+            user.UpdatedAt = DateTime.UtcNow;
+
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = "Cập nhật thông tin cá nhân thành công!",
+                user = new
+                {
+                    id = user.Id,
+                    email = user.Email,
+                    fullName = user.FullName,
+                    name = user.FullName,
+                    phoneNumber = user.PhoneNumber,
+                    gender = user.Gender,
+                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
+                    avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
+                    authProvider = user.AuthProvider,
+                    isActive = user.IsActive
+                }
             });
         }
 
@@ -584,7 +744,7 @@ namespace LoginApp.Controllers
                     .ThenInclude(ur => ur.Role)
                 .FirstOrDefaultAsync(x => x.User.Email == email && x.Token == refreshToken);
 
-            // Kiểm tra Refresh Token: Hết hạn (> 2 phút không thao tác/refresh) hoặc đã bị hủy
+            // Kiểm tra Refresh Token: Hết hạn hoặc đã bị hủy
             if (storedToken == null || storedToken.IsRevoked || storedToken.ExpiresAt <= DateTime.UtcNow)
             {
                 if (storedToken != null)
@@ -592,7 +752,7 @@ namespace LoginApp.Controllers
                     storedToken.IsRevoked = true;
                     await _db.SaveChangesAsync();
                 }
-                return Unauthorized(new { message = "Refresh Token đã hết hạn (2 phút) hoặc không hợp lệ. Vui lòng đăng nhập lại." });
+                return Unauthorized(new { message = "Phiên đăng nhập đã hết hạn hoặc không hợp lệ. Vui lòng đăng nhập lại." });
             }
 
             // Kiểm tra xem tài khoản người dùng có đang bị khóa (is_active = false) không
@@ -603,14 +763,14 @@ namespace LoginApp.Controllers
                 return Unauthorized(new { message = "Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên." });
             }
 
-            // Rotate Token: Cấp CẢ CẶP Access mới (30s) + Refresh mới (2 phút)
+            // Rotate Token: Cấp CẢ CẶP Access mới + Refresh mới
             var refreshUserRole = storedToken.User.UserRoles.FirstOrDefault()?.Role.Name ?? "USER";
             var newAccessToken = _tokenService.GenerateAccessToken(email, refreshUserRole);
             var newRefreshToken = _tokenService.GenerateRefreshToken();
 
-            // Cập nhật Token mới và gia hạn 2 phút mới vào database (Sliding Window)
+            // Cập nhật Token mới và gia hạn mới vào database (Sliding Window)
             storedToken.Token = newRefreshToken;
-            storedToken.ExpiresAt = DateTime.UtcNow.AddMinutes(2); // Cấp mới 2 phút cho Refresh Token
+            storedToken.ExpiresAt = DateTime.UtcNow.AddMinutes(_configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes", 10080));
             storedToken.IpAddress = clientIp;
             storedToken.UserAgent = userAgent;
 
@@ -620,10 +780,10 @@ namespace LoginApp.Controllers
 
             return Ok(new
             {
-                message = "Rotate Token thành công (Cấp mới Access 30s + Refresh 2m)!",
+                message = "Rotate Token thành công!",
                 accessToken = newAccessToken,
                 refreshToken = newRefreshToken,
-                expiresIn = 30
+                expiresIn = _configuration.GetValue<int>("JwtSettings:AccessTokenSeconds", 3600)
             });
         }
 
@@ -708,7 +868,7 @@ namespace LoginApp.Controllers
 
         [Authorize(Roles = "ADMIN")]
         [HttpPut("admin/users/{id}/toggle-active")]
-        public async Task<IActionResult> AdminToggleUserActive(Guid id)
+        public async Task<IActionResult> AdminToggleUserActive(int id)
         {
             var user = await _db.Users
                 .Include(u => u.UserRoles)
@@ -746,7 +906,7 @@ namespace LoginApp.Controllers
 
         [Authorize(Roles = "ADMIN")]
         [HttpDelete("admin/users/{id}")]
-        public async Task<IActionResult> AdminDeleteUser(Guid id)
+        public async Task<IActionResult> AdminDeleteUser(int id)
         {
             var user = await _db.Users
                 .Include(u => u.UserRoles)

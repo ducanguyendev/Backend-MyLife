@@ -1,10 +1,12 @@
 using System.Text;
-using LoginApp.Data;
-using LoginApp.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
-using Microsoft.OpenApi.Models; // Dùng lại Models như bình thường
+using Microsoft.OpenApi.Models;
+using MyLife.Shared.Data;
+using MyLife.Features.Auth.Services;
+using MyLife.Features.Avatar.Services;
+using MyLife.Features.FamilyTree.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,23 +26,13 @@ builder.Services.AddControllers();
 builder.Services.AddHttpClient();
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IGoogleDriveAvatarService, GoogleDriveAvatarService>();
+builder.Services.AddScoped<IFamilyTreeService, FamilyTreeService>();
 
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowReactApp", policy =>
     {
-        policy.SetIsOriginAllowed(origin => 
-              {
-                  try
-                  {
-                      var host = new Uri(origin).Host;
-                      return host == "localhost" || host == "127.0.0.1";
-                  }
-                  catch
-                  {
-                      return false;
-                  }
-              })
+        policy.WithOrigins("http://localhost:7000")
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials();
@@ -125,13 +117,7 @@ using (var scope = app.Services.CreateScope())
     try
     {
         await db.Database.EnsureCreatedAsync();
-        // Đảm bảo các cột mới tồn tại trong bảng users của PostgreSQL
-        await db.Database.ExecuteSqlRawAsync(@"
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(100);
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number VARCHAR(20);
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(20);
-            ALTER TABLE users ADD COLUMN IF NOT EXISTS date_of_birth DATE;
-        ");
+
         await db.SeedDataAsync();
         Console.WriteLine("[DATABASE] ✅ Kết nối PostgreSQL, kiểm tra Schema và Seed dữ liệu khởi tạo thành công!");
     }

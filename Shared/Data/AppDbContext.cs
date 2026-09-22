@@ -1,9 +1,9 @@
 using System;
 using System.Threading.Tasks;
-using LoginApp.Entities;
+using MyLife.Shared.Entities;
 using Microsoft.EntityFrameworkCore;
 
-namespace LoginApp.Data
+namespace MyLife.Shared.Data
 {
     public class AppDbContext : DbContext
     {
@@ -16,6 +16,9 @@ namespace LoginApp.Data
         public DbSet<UserRole> UserRoles => Set<UserRole>();
         public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
         public DbSet<LoginLog> LoginLogs => Set<LoginLog>();
+        public DbSet<FamilyMember> FamilyMembers => Set<FamilyMember>();
+        public DbSet<FamilyRelationship> FamilyRelationships => Set<FamilyRelationship>();
+        public DbSet<Generation> Generations => Set<Generation>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -26,7 +29,7 @@ namespace LoginApp.Data
             {
                 entity.ToTable("users");
                 entity.HasKey(e => e.Id);
-                entity.Property(e => e.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
+                entity.Property(e => e.Id).HasColumnName("id");
                 entity.Property(e => e.Email).HasColumnName("email").HasMaxLength(255).IsRequired();
                 entity.HasIndex(e => e.Email).IsUnique();
                 entity.Property(e => e.PasswordHash).HasColumnName("password_hash").HasMaxLength(255).IsRequired();
@@ -77,7 +80,7 @@ namespace LoginApp.Data
             {
                 entity.ToTable("refresh_tokens");
                 entity.HasKey(e => e.Id);
-                entity.Property(e => e.Id).HasColumnName("id").HasDefaultValueSql("gen_random_uuid()");
+                entity.Property(e => e.Id).HasColumnName("id");
                 entity.Property(e => e.UserId).HasColumnName("user_id");
                 entity.Property(e => e.Token).HasColumnName("token").HasColumnType("text").IsRequired();
                 entity.HasIndex(e => e.Token).IsUnique();
@@ -116,10 +119,70 @@ namespace LoginApp.Data
                     .HasForeignKey(e => e.UserId)
                     .OnDelete(DeleteBehavior.SetNull);
             });
+
+            // 6. Table FAMILY_MEMBERS
+            modelBuilder.Entity<FamilyMember>(entity =>
+            {
+                entity.ToTable("family_members");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id");
+                
+                entity.HasOne(e => e.Father)
+                    .WithMany(e => e.ChildrenAsFather)
+                    .HasForeignKey(e => e.FatherId)
+                    .OnDelete(DeleteBehavior.SetNull);
+                    
+                entity.HasOne(e => e.Mother)
+                    .WithMany(e => e.ChildrenAsMother)
+                    .HasForeignKey(e => e.MotherId)
+                    .OnDelete(DeleteBehavior.SetNull);
+                    
+                entity.HasOne(e => e.Spouse)
+                    .WithMany()
+                    .HasForeignKey(e => e.SpouseId)
+                    .OnDelete(DeleteBehavior.SetNull);
+            });
+
+            // 7. Table FAMILY_RELATIONSHIPS
+            modelBuilder.Entity<FamilyRelationship>(entity =>
+            {
+                entity.ToTable("family_relationships");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id");
+                entity.Property(e => e.Member1Id).HasColumnName("member1_id");
+                entity.Property(e => e.Member2Id).HasColumnName("member2_id");
+                entity.Property(e => e.RelationType).HasColumnName("relation_type").HasMaxLength(50).IsRequired();
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                
+                entity.HasIndex(e => new { e.Member1Id, e.Member2Id, e.RelationType }).IsUnique();
+
+                entity.HasOne(e => e.Member1)
+                    .WithMany(m => m.RelationsAsMember1)
+                    .HasForeignKey(e => e.Member1Id)
+                    .OnDelete(DeleteBehavior.Cascade);
+
+                entity.HasOne(e => e.Member2)
+                    .WithMany(m => m.RelationsAsMember2)
+                    .HasForeignKey(e => e.Member2Id)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            // 8. Table GENERATIONS
+            modelBuilder.Entity<Generation>(entity =>
+            {
+                entity.ToTable("generations");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedNever();
+                entity.Property(e => e.Name).HasColumnName("name").HasMaxLength(50).IsRequired();
+                entity.Property(e => e.Title).HasColumnName("title").HasMaxLength(100);
+                entity.Property(e => e.Description).HasColumnName("description").HasColumnType("text");
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+            });
         }
 
         /// <summary>
-        /// Tự động chèn dữ liệu mẫu (Roles & Duy nhất 1 tài khoản Admin) khi database rỗng
+        /// Tự động chèn dữ liệu mẫu (Roles, Generations & Duy nhất 1 tài khoản Admin) khi database rỗng
         /// </summary>
         public async Task SeedDataAsync()
         {
@@ -132,16 +195,31 @@ namespace LoginApp.Data
                 await SaveChangesAsync();
             }
 
+            // Seed Generations (Đời 1 -> Đời 5)
+            if (!await Generations.AnyAsync())
+            {
+                var defaultGenerations = new[]
+                {
+                    new Generation { Id = 1, Name = "Đời 1", Title = "Thế hệ thứ nhất", Description = "Thế hệ khởi thủy / Tiền bối" },
+                    new Generation { Id = 2, Name = "Đời 2", Title = "Thế hệ thứ hai", Description = "Thế hệ con thứ nhất" },
+                    new Generation { Id = 3, Name = "Đời 3", Title = "Thế hệ thứ ba", Description = "Thế hệ con cháu kế cận" },
+                    new Generation { Id = 4, Name = "Đời 4", Title = "Thế hệ thứ tư", Description = "Thế hệ chắt" },
+                    new Generation { Id = 5, Name = "Đời 5", Title = "Thế hệ thứ năm", Description = "Thế hệ chút" },
+                };
+                await Generations.AddRangeAsync(defaultGenerations);
+                await SaveChangesAsync();
+            }
+
             // Seed Users: Chỉ 1 tài khoản Admin duy nhất
             if (!await Users.AnyAsync())
             {
                 var adminUser = new User
                 {
-                    Id = Guid.Parse("a0000000-0000-0000-0000-000000000001"),
+                    Id = 1,
                     Email = "admin@gmail.com",
                     PasswordHash = BCrypt.Net.BCrypt.HashPassword("Admin@123"),
                     IsActive = true,
-                    VerifiedAt = DateTime.UtcNow
+                    VerifiedAt = DateTime.UtcNow,
                 };
 
                 await Users.AddAsync(adminUser);
