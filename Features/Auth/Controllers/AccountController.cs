@@ -262,15 +262,15 @@ namespace MyLife.Features.Auth.Controllers
                 {
                     _db.UserRoles.Add(new UserRole
                     {
-                        UserId = newUser.Id,
-                        RoleId = userRole.Id
+                        User = newUser,
+                        Role = userRole
                     });
                 }
 
                 // 8. Ghi log vào login_logs
                 _db.LoginLogs.Add(new LoginLog
                 {
-                    UserId = newUser.Id,
+                    User = newUser,
                     AttemptEmail = normalizedEmail,
                     Status = "SUCCESS",
                     IpAddress = clientIp,
@@ -436,8 +436,8 @@ namespace MyLife.Features.Auth.Controllers
                     {
                         _db.UserRoles.Add(new UserRole
                         {
-                            UserId = user.Id,
-                            RoleId = userRole.Id
+                            User = user,
+                            Role = userRole
                         });
                     }
 
