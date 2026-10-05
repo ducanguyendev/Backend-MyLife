@@ -1,165 +1,84 @@
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 
-namespace MyLife.Features.Avatar.Services
+namespace MyLife.Features.Avatar.Services;
+
+public interface IGoogleDriveAvatarService
 {
-    public interface IGoogleDriveAvatarService
+    Task<(bool Success, string? DriveUrl, string? FileId)> UploadAvatarAsync(string email, IFormFile file);
+    Task<bool> DeleteAvatarAsync(string email);
+}
+
+public sealed class GoogleDriveAvatarService(
+    IConfiguration configuration,
+    IHttpClientFactory httpClientFactory,
+    ILogger<GoogleDriveAvatarService> logger) : IGoogleDriveAvatarService
+{
+    private string WebAppUrl => configuration["GoogleDrive:WebAppUrl"] ?? string.Empty;
+    private static string SanitizeEmail(string email) => email.Trim().ToLowerInvariant().Replace("/", "_").Replace("\\", "_");
+
+    public async Task<(bool Success, string? DriveUrl, string? FileId)> UploadAvatarAsync(string email, IFormFile file)
     {
-        Task<(bool Success, string? DriveUrl, string? FileId)> UploadAvatarAsync(string email, IFormFile file);
-        Task<bool> DeleteAvatarAsync(string email);
+        if (file.Length == 0 || string.IsNullOrWhiteSpace(WebAppUrl)) return (false, null, null);
+        try
+        {
+            await using var stream = new MemoryStream();
+            await file.CopyToAsync(stream);
+            using var response = await SendAsync(new
+            {
+                action = "upload",
+                email = SanitizeEmail(email),
+                fileBase64 = Convert.ToBase64String(stream.ToArray()),
+                contentType = file.ContentType
+            });
+            if (response is null) return (false, null, null);
+            var root = response.RootElement;
+            if (root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False) return (false, null, null);
+            var fileId = ReadString(root, "fileId") ?? ReadString(root, "id");
+            var driveUrl = ReadString(root, "viewUrl") ?? ReadString(root, "downloadUrl") ??
+                           ReadString(root, "fileUrl") ?? ReadString(root, "url") ?? ReadString(root, "directUrl");
+            if (string.IsNullOrWhiteSpace(driveUrl) && !string.IsNullOrWhiteSpace(fileId))
+                driveUrl = $"https://drive.google.com/file/d/{fileId}/view";
+            return (!string.IsNullOrWhiteSpace(driveUrl) || !string.IsNullOrWhiteSpace(fileId), driveUrl, fileId);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            logger.LogWarning(ex, "Avatar upload storage call failed");
+            return (false, null, null);
+        }
     }
 
-    public class GoogleDriveAvatarService : IGoogleDriveAvatarService
+    public async Task<bool> DeleteAvatarAsync(string email)
     {
-        private readonly IConfiguration _config;
-        private readonly IHttpClientFactory _httpClientFactory;
-        private readonly string _webAppUrl;
-
-        public GoogleDriveAvatarService(
-            IConfiguration config, 
-            IHttpClientFactory httpClientFactory)
+        if (string.IsNullOrWhiteSpace(WebAppUrl)) return false;
+        try
         {
-            _config = config;
-            _httpClientFactory = httpClientFactory;
-            _webAppUrl = _config["GoogleDrive:WebAppUrl"] ?? "";
+            using var response = await SendAsync(new { action = "delete", email = SanitizeEmail(email) });
+            if (response is null) return false;
+            var root = response.RootElement;
+            return !root.TryGetProperty("success", out var success) || success.ValueKind == JsonValueKind.True;
         }
-
-        private string SanitizeEmail(string email)
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
         {
-            return email.Trim().ToLowerInvariant().Replace("/", "_").Replace("\\", "_");
-        }
-
-        public async Task<(bool Success, string? DriveUrl, string? FileId)> UploadAvatarAsync(string email, IFormFile file)
-        {
-            if (file == null || file.Length == 0) return (false, null, null);
-
-            var cleanEmail = SanitizeEmail(email);
-
-            // 1. Đọc toàn bộ byte của file
-            byte[] fileBytes;
-            using (var ms = new MemoryStream())
-            {
-                await file.CopyToAsync(ms);
-                fileBytes = ms.ToArray();
-            }
-
-            string? driveUrl = null;
-            string? fileId = null;
-
-            // 2. Đẩy trực tiếp lên Google Drive thông qua Google Apps Script Webhook
-            if (!string.IsNullOrWhiteSpace(_webAppUrl) && fileBytes.Length > 0)
-            {
-                try
-                {
-                    var base64 = Convert.ToBase64String(fileBytes);
-                    var payloadObj = new
-                    {
-                        action = "upload",
-                        email = cleanEmail,
-                        fileBase64 = base64,
-                        contentType = file.ContentType
-                    };
-
-                    var jsonString = JsonSerializer.Serialize(payloadObj);
-                    var content = new StringContent(jsonString, Encoding.UTF8, "application/json");
-
-                    using var handler = new HttpClientHandler
-                    {
-                        AllowAutoRedirect = true,
-                        MaxAutomaticRedirections = 5
-                    };
-                    using var client = new HttpClient(handler);
-                    client.Timeout = TimeSpan.FromSeconds(30);
-
-                    var response = await client.PostAsync(_webAppUrl, content);
-                    var respContent = await response.Content.ReadAsStringAsync();
-                    Console.WriteLine($"[GoogleDriveAvatarService] 🚀 Google Drive Upload Response: {respContent}");
-
-                    if (!string.IsNullOrWhiteSpace(respContent))
-                    {
-                        try
-                        {
-                            using var doc = JsonDocument.Parse(respContent);
-                            var root = doc.RootElement;
-
-                            if (root.TryGetProperty("viewUrl", out var vuProp) && vuProp.ValueKind == JsonValueKind.String)
-                                driveUrl = vuProp.GetString();
-                            else if (root.TryGetProperty("downloadUrl", out var dlProp) && dlProp.ValueKind == JsonValueKind.String)
-                                driveUrl = dlProp.GetString();
-                            else if (root.TryGetProperty("fileUrl", out var fuProp) && fuProp.ValueKind == JsonValueKind.String)
-                                driveUrl = fuProp.GetString();
-                            else if (root.TryGetProperty("url", out var uProp) && uProp.ValueKind == JsonValueKind.String)
-                                driveUrl = uProp.GetString();
-                            else if (root.TryGetProperty("directUrl", out var duProp) && duProp.ValueKind == JsonValueKind.String)
-                                driveUrl = duProp.GetString();
-
-                            if (root.TryGetProperty("fileId", out var idProp) && idProp.ValueKind == JsonValueKind.String)
-                                fileId = idProp.GetString();
-                            else if (root.TryGetProperty("id", out var idProp2) && idProp2.ValueKind == JsonValueKind.String)
-                                fileId = idProp2.GetString();
-
-                            // Nếu có fileId mà chưa có driveUrl thì tạo link Google Drive chuẩn
-                            if (string.IsNullOrEmpty(driveUrl) && !string.IsNullOrEmpty(fileId))
-                            {
-                                driveUrl = $"https://drive.google.com/file/d/{fileId}/view";
-                            }
-                        }
-                        catch
-                        {
-                            if (respContent.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                            {
-                                driveUrl = respContent.Trim();
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[GoogleDriveAvatarService] ⚠️ Lỗi khi gửi file lên Google Drive: {ex.Message}");
-                }
-            }
-
-            return (true, driveUrl, fileId);
-        }
-
-        public async Task<bool> DeleteAvatarAsync(string email)
-        {
-            var cleanEmail = SanitizeEmail(email);
-
-            // Gửi lệnh xóa file trên Google Drive
-            if (!string.IsNullOrWhiteSpace(_webAppUrl))
-            {
-                try
-                {
-                    var payloadObj = new
-                    {
-                        action = "delete",
-                        email = cleanEmail
-                    };
-
-                    var jsonString = JsonSerializer.Serialize(payloadObj);
-                    var content = new StringContent(jsonString, Encoding.UTF8, "application/json");
-
-                    using var handler = new HttpClientHandler
-                    {
-                        AllowAutoRedirect = true,
-                        MaxAutomaticRedirections = 5
-                    };
-                    using var client = new HttpClient(handler);
-                    client.Timeout = TimeSpan.FromSeconds(30);
-
-                    var response = await client.PostAsync(_webAppUrl, content);
-                    var respContent = await response.Content.ReadAsStringAsync();
-                    Console.WriteLine($"[GoogleDriveAvatarService] 🗑️ Google Drive Delete Response: {respContent}");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[GoogleDriveAvatarService] ⚠️ Lỗi khi gửi lệnh xóa file lên Google Drive: {ex.Message}");
-                }
-            }
-
-            return true;
+            logger.LogWarning(ex, "Avatar deletion storage call failed");
+            return false;
         }
     }
+
+    private async Task<JsonDocument?> SendAsync(object payload)
+    {
+        using var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        using var request = new HttpRequestMessage(HttpMethod.Post, WebAppUrl) { Content = content };
+        using var response = await httpClientFactory.CreateClient(nameof(GoogleDriveAvatarService)).SendAsync(request);
+        if (!response.IsSuccessStatusCode)
+        {
+            logger.LogWarning("Avatar storage returned HTTP {StatusCode}", (int)response.StatusCode);
+            return null;
+        }
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        return await JsonDocument.ParseAsync(stream);
+    }
+
+    private static string? ReadString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 }

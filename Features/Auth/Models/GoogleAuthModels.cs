@@ -7,7 +7,8 @@ namespace MyLife.Features.Auth.Models
     /// </summary>
     public class GoogleAuthRequest
     {
-        public string Code { get; set; } = string.Empty;
+        public string? Code { get; set; }
+        public string? IdToken { get; set; }
         public string? RedirectUri { get; set; }
     }
 

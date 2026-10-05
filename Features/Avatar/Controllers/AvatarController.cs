@@ -78,8 +78,13 @@ namespace MyLife.Features.Avatar.Controllers
             var isMimeOk = allowedMimeTypes.Contains(file.ContentType.ToLowerInvariant());
             var isExtOk = !string.IsNullOrEmpty(ext) && allowedExts.Contains(ext);
 
-            if (!isMimeOk && !isExtOk)
+            if (!isMimeOk || !isExtOk)
                 return BadRequest(new { message = "Chỉ chấp nhận các định dạng ảnh JPG, PNG, WEBP, GIF." });
+
+            var normalizedEmail = email.Trim().ToLowerInvariant();
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
+            if (user is null || !user.IsActive)
+                return Unauthorized(new { success = false, message = "Phiên làm việc không hợp lệ." });
 
             var (success, driveUrl, fileId) = await _avatarService.UploadAvatarAsync(email, file);
             if (!success)
@@ -108,15 +113,9 @@ namespace MyLife.Features.Avatar.Controllers
                 : $"/api/avatar/{Uri.EscapeDataString(email)}?t={timestamp}";
 
             // Cập nhật đường dẫn file ảnh avatar vào cơ sở dữ liệu PostgreSQL
-            var normalizedEmail = email.Trim().ToLowerInvariant();
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
-            if (user != null)
-            {
-                user.AvatarUrl = finalAvatarUrl;
-                user.UpdatedAt = DateTime.UtcNow;
-                await _db.SaveChangesAsync();
-                Console.WriteLine($"[AVATAR] 💾 Đã lưu avatarUrl vào DB cho user: {normalizedEmail} -> {finalAvatarUrl}");
-            }
+            user.AvatarUrl = finalAvatarUrl;
+            user.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
 
             return Ok(new
             {
@@ -138,18 +137,16 @@ namespace MyLife.Features.Avatar.Controllers
             if (string.IsNullOrEmpty(email))
                 return Unauthorized(new { message = "Phiên làm việc không hợp lệ." });
 
-            await _avatarService.DeleteAvatarAsync(email);
-
-            // Cập nhật gỡ bỏ đường dẫn avatar trong cơ sở dữ liệu PostgreSQL
             var normalizedEmail = email.Trim().ToLowerInvariant();
             var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
-            if (user != null)
-            {
-                user.AvatarUrl = null;
-                user.UpdatedAt = DateTime.UtcNow;
-                await _db.SaveChangesAsync();
-                Console.WriteLine($"[AVATAR] 🗑️ Đã xóa avatarUrl trong DB cho user: {normalizedEmail}");
-            }
+            if (user is null || !user.IsActive)
+                return Unauthorized(new { success = false, message = "Phiên làm việc không hợp lệ." });
+            if (!await _avatarService.DeleteAvatarAsync(email))
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new { success = false, message = "Avatar storage is temporarily unavailable." });
+
+            user.AvatarUrl = null;
+            user.UpdatedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
 
             return Ok(new { message = "Đã xóa ảnh đại diện thành công!" });
         }

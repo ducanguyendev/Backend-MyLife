@@ -20,13 +20,14 @@ namespace MyLife.Features.Auth.Models
         public string Email { get; set; } = string.Empty;
         public string PasswordHash { get; set; } = string.Empty;
         public string FullName { get; set; } = string.Empty;
-        public string Role { get; set; } = "Member";
+        public string Role { get; set; } = MyLife.Shared.Security.AppRoles.User;
     }
 
     public class TokenResponseDto
     {
         public string AccessToken { get; set; } = string.Empty;
         public string RefreshToken { get; set; } = string.Empty;
-        public int ExpiresIn { get; set; } = 30; // 30s
+        public int AccessTokenExpiresIn { get; set; }
+        public int RefreshTokenExpiresIn { get; set; }
     }
 }

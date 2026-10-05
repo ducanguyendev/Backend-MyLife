@@ -1,960 +1,319 @@
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.EntityFrameworkCore;
+using System.Net.Http.Json;
 using System.Security.Claims;
 using System.ComponentModel.DataAnnotations;
-using MyLife.Shared.Data;
-using MyLife.Shared.Entities;
+using System.Security.Cryptography;
+using System.Text;
+using Google.Apis.Auth;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.EntityFrameworkCore;
 using MyLife.Features.Auth.Models;
 using MyLife.Features.Auth.Services;
 using MyLife.Features.User.Models;
-namespace MyLife.Features.Auth.Controllers
+using MyLife.Shared.Data;
+using MyLife.Shared.Entities;
+using MyLife.Shared.Security;
+using AppUser = MyLife.Shared.Entities.User;
+
+namespace MyLife.Features.Auth.Controllers;
+
+[ApiController]
+[Route("api")]
+public sealed class AccountController : ControllerBase
 {
-    using User = MyLife.Shared.Entities.User;
+    private readonly AppDbContext _db;
+    private readonly ITokenService _tokens;
+    private readonly IHttpClientFactory _httpClients;
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<AccountController> _logger;
 
-    [ApiController]
-    [Route("api/")]
-    public class AccountController : ControllerBase
+    public AccountController(AppDbContext db, ITokenService tokens, IHttpClientFactory httpClients, IConfiguration configuration, ILogger<AccountController> logger)
+        => (_db, _tokens, _httpClients, _configuration, _logger) = (db, tokens, httpClients, configuration, logger);
+
+    [HttpPost("login")]
+    public async Task<IActionResult> Login([FromBody] LoginViewModel model)
     {
-        private readonly AppDbContext _db;
-        private readonly ITokenService _tokenService;
-        private readonly IHttpClientFactory _httpClientFactory;
-        private readonly IConfiguration _configuration;
-
-        public AccountController(
-            AppDbContext db,
-            ITokenService tokenService,
-            IHttpClientFactory httpClientFactory,
-            IConfiguration configuration)
+        if (!ModelState.IsValid) return ValidationProblem(ModelState);
+        var email = NormalizeEmail(model.Email);
+        var user = await UserWithRoles().SingleOrDefaultAsync(x => x.Email == email);
+        if (user is null || !user.IsActive || !user.HasLocalProvider || !BCrypt.Net.BCrypt.Verify(model.Password, user.PasswordHash))
         {
-            _db = db;
-            _tokenService = tokenService;
-            _httpClientFactory = httpClientFactory;
-            _configuration = configuration;
-        }
-
-        [HttpPost("login")]
-        public async Task<IActionResult> Login([FromBody] LoginViewModel model)
-        {
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            try
-            {
-                var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString();
-                var userAgent = Request.Headers.UserAgent.ToString();
-
-                // 1. Email: Bắt buộc, trim khoảng trắng và chuyển lowercase
-                var normalizedEmail = (model.Email ?? string.Empty).Trim().ToLowerInvariant();
-
-                // 2. Password: Bắt buộc, KHÔNG trim, độ dài từ 8 đến 72 ký tự
-                var rawPassword = model.Password;
-
-                // 3. Tìm tài khoản trong database PostgreSQL (kèm vai trò Roles)
-                var user = await _db.Users
-                    .Include(u => u.UserRoles)
-                    .ThenInclude(ur => ur.Role)
-                    .FirstOrDefaultAsync(u => u.Email == normalizedEmail);
-
-                if (user == null)
-                {
-                    // Ghi nhận log đăng nhập thất bại
-                    _db.LoginLogs.Add(new LoginLog
-                    {
-                        AttemptEmail = normalizedEmail,
-                        Status = "FAILED",
-                        IpAddress = clientIp,
-                        CreatedAt = DateTime.UtcNow
-                    });
-                    await _db.SaveChangesAsync();
-
-                    return Unauthorized(new { message = "Email hoặc mật khẩu không chính xác." });
-                }
-
-                // Kiểm tra trạng thái tài khoản
-                if (!user.IsActive)
-                {
-                    _db.LoginLogs.Add(new LoginLog
-                    {
-                        UserId = user.Id,
-                        AttemptEmail = normalizedEmail,
-                        Status = "FAILED",
-                        IpAddress = clientIp,
-                        CreatedAt = DateTime.UtcNow
-                    });
-                    await _db.SaveChangesAsync();
-
-                    return Unauthorized(new { message = "Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên." });
-                }
-
-                // 4. Verify password bằng BCrypt
-                bool isPasswordValid = BCrypt.Net.BCrypt.Verify(rawPassword, user.PasswordHash);
-                if (!isPasswordValid)
-                {
-                    _db.LoginLogs.Add(new LoginLog
-                    {
-                        UserId = user.Id,
-                        AttemptEmail = normalizedEmail,
-                        Status = "FAILED",
-                        IpAddress = clientIp,
-                        CreatedAt = DateTime.UtcNow
-                    });
-                    await _db.SaveChangesAsync();
-
-                    return Unauthorized(new { message = "Email hoặc mật khẩu không chính xác." });
-                }
-
-                // 5. Ghi log đăng nhập thành công
-                _db.LoginLogs.Add(new LoginLog
-                {
-                    UserId = user.Id,
-                    AttemptEmail = normalizedEmail,
-                    Status = "SUCCESS",
-                    IpAddress = clientIp,
-                    CreatedAt = DateTime.UtcNow
-                });
-
-                // 6. Sinh cặp Token mới: Access Token (30s) + Refresh Token (2m)
-                var primaryRole = user.UserRoles.FirstOrDefault()?.Role.Name ?? "USER";
-                var accessToken = _tokenService.GenerateAccessToken(user.Email, primaryRole);
-                var refreshToken = _tokenService.GenerateRefreshToken();
-
-                // Lưu Refresh Token vào bảng refresh_tokens trong PostgreSQL
-                var newRefreshToken = new RefreshToken
-                {
-                    UserId = user.Id,
-                    Token = refreshToken,
-                    IpAddress = clientIp,
-                    UserAgent = userAgent,
-                    ExpiresAt = DateTime.UtcNow.AddMinutes(_configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes", 10080)),
-                    IsRevoked = false,
-                    CreatedAt = DateTime.UtcNow
-                };
-
-                _db.RefreshTokens.Add(newRefreshToken);
-                await _db.SaveChangesAsync();
-
-                SetAuthCookies(accessToken, refreshToken, model.RememberMe, 120);
-
-                var userDto = new
-                {
-                    id = user.Id,
-                    email = user.Email,
-                    fullName = user.FullName,
-                    name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
-                    phoneNumber = user.PhoneNumber,
-                    gender = user.Gender,
-                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
-                    avatarUrl = user.AvatarUrl,
-                    role = primaryRole,
-                    authProvider = user.AuthProvider,
-                    isActive = user.IsActive
-                };
-
-                // Tuyệt đối không trả về password hay password hash
-                return Ok(new
-                {
-                    message = "Đăng nhập thành công!",
-                    user = userDto,
-                    id = user.Id,
-                    email = user.Email,
-                    fullName = user.FullName,
-                    name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
-                    phoneNumber = user.PhoneNumber,
-                    gender = user.Gender,
-                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
-                    role = primaryRole,
-                    avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
-                    authProvider = user.AuthProvider,
-                    isActive = user.IsActive,
-                    accessToken,
-                    refreshToken,
-                    expiresIn = 30
-                });
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ERROR] Lỗi xử lý đăng nhập PostgreSQL: {ex.Message}");
-                return StatusCode(500, new { message = $"Lỗi kết nối cơ sở dữ liệu PostgreSQL: {ex.Message}" });
-            }
-        }
-
-        [HttpPost("auth/register")]
-        public async Task<IActionResult> Register([FromBody] RegisterViewModel model)
-        {
-            if (!ModelState.IsValid)
-            {
-                var firstError = ModelState.Values
-                    .SelectMany(v => v.Errors)
-                    .Select(e => e.ErrorMessage)
-                    .FirstOrDefault(msg => !string.IsNullOrEmpty(msg));
-
-                return BadRequest(new { message = firstError ?? "Dữ liệu đăng ký không hợp lệ.", errors = ModelState });
-            }
-
-            try
-            {
-                var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString();
-
-                // 1. Normalize email: trim + lowercase
-                var normalizedEmail = (model.Email ?? string.Empty).Trim().ToLowerInvariant();
-
-                // 2. Kiểm tra confirm password khớp
-                if (model.Password != model.ConfirmPassword)
-                    return BadRequest(new { message = "Mật khẩu nhập lại không khớp. Vui lòng kiểm tra lại." });
-
-                // 3. Kiểm tra ngày sinh & độ tuổi hợp lệ (6 - 120 tuổi)
-                if (!model.DateOfBirth.HasValue)
-                {
-                    return BadRequest(new { message = "Vui lòng chọn ngày sinh." });
-                }
-                var today = DateOnly.FromDateTime(DateTime.UtcNow);
-                if (model.DateOfBirth.Value > today)
-                {
-                    return BadRequest(new { message = "Ngày sinh không hợp lệ (không được lớn hơn ngày hiện tại)." });
-                }
-                var age = today.Year - model.DateOfBirth.Value.Year;
-                if (model.DateOfBirth.Value > today.AddYears(-age)) age--;
-                if (age < 6)
-                {
-                    return BadRequest(new { message = "Bạn phải từ đủ 6 tuổi trở lên để đăng ký tài khoản." });
-                }
-                if (age > 120)
-                {
-                    return BadRequest(new { message = "Ngày sinh không hợp lệ (độ tuổi vượt quá 120 tuổi)." });
-                }
-
-                // 4. Kiểm tra định dạng đuôi Gmail (@gmail.com)
-                if (!normalizedEmail.EndsWith("@gmail.com"))
-                {
-                    return BadRequest(new { message = "Hệ thống chỉ chấp nhận địa chỉ email Gmail (@gmail.com)." });
-                }
-
-                // 5. Kiểm tra email đã tồn tại chưa
-                var exists = await _db.Users.AnyAsync(u => u.Email == normalizedEmail);
-                if (exists)
-                    return Conflict(new { message = "Email này đã được đăng ký. Vui lòng sử dụng email khác hoặc đăng nhập." });
-
-                // 6. Băm mật khẩu bằng BCrypt (cost factor 11)
-                var passwordHash = BCrypt.Net.BCrypt.HashPassword(model.Password, workFactor: 11);
-
-                // 7. Tạo User mới
-                var newUser = new User
-                {
-                    Email = normalizedEmail,
-                    PasswordHash = passwordHash,
-                    FullName = model.FullName.Trim(),
-                    PhoneNumber = model.PhoneNumber.Trim(),
-                    Gender = model.Gender.Trim(),
-                    DateOfBirth = model.DateOfBirth.Value,
-                    AvatarUrl = null,
-                    AuthProvider = 0, // 0 = LOCAL
-                    IsActive = true,
-                    VerifiedAt = DateTime.UtcNow,
-                    CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow
-                };
-                _db.Users.Add(newUser);
-
-                // 7. Gán vai trò USER mặc định (role_id = 2)
-                var userRole = await _db.Roles.FirstOrDefaultAsync(r => r.Name == "USER");
-                if (userRole != null)
-                {
-                    _db.UserRoles.Add(new UserRole
-                    {
-                        User = newUser,
-                        Role = userRole
-                    });
-                }
-
-                // 8. Ghi log vào login_logs
-                _db.LoginLogs.Add(new LoginLog
-                {
-                    User = newUser,
-                    AttemptEmail = normalizedEmail,
-                    Status = "SUCCESS",
-                    IpAddress = clientIp,
-                    CreatedAt = DateTime.UtcNow
-                });
-
-                await _db.SaveChangesAsync();
-
-                Console.WriteLine($"[INFO] Tài khoản mới đã được đăng ký: {normalizedEmail} (Họ tên: {newUser.FullName}, SĐT: {newUser.PhoneNumber})");
-
-                return StatusCode(201, new
-                {
-                    message = "Đăng ký tài khoản thành công! Vui lòng đăng nhập để tiếp tục.",
-                    email = newUser.Email
-                });
-            }
-            catch (Exception ex)
-            {
-                var errorDetails = ex.InnerException?.Message ?? ex.Message;
-                Console.WriteLine($"[ERROR] Lỗi xử lý đăng ký tài khoản: {errorDetails}");
-                return StatusCode(500, new { message = $"Lỗi máy chủ khi đăng ký tài khoản: {errorDetails}" });
-            }
-        }
-
-        [HttpPost("auth/google")]
-        public async Task<IActionResult> GoogleLogin([FromBody] GoogleAuthRequest request)
-        {
-            if (string.IsNullOrWhiteSpace(request.Code))
-            {
-                return BadRequest(new { message = "Mã xác thực Google (Authorization Code) là bắt buộc." });
-            }
-
-            try
-            {
-                var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString();
-                var userAgent = Request.Headers.UserAgent.ToString();
-
-                var googleClientId = _configuration["Authentication:Google:ClientId"];
-                var googleClientSecret = _configuration["Authentication:Google:ClientSecret"];
-
-                string? userEmail = null;
-                string? userName = null;
-                string? userPicture = null;
-
-                // Nếu có cấu hình Client Secret thật từ Google Cloud, tiến hành trao đổi mã thực tế
-                if (!string.IsNullOrWhiteSpace(googleClientId) && 
-                    !string.IsNullOrWhiteSpace(googleClientSecret) &&
-                    !googleClientId.StartsWith("YOUR_GOOGLE_CLIENT_ID"))
-                {
-                    var httpClient = _httpClientFactory.CreateClient();
-                    var tokenParams = new Dictionary<string, string>
-                    {
-                        { "code", request.Code },
-                        { "client_id", googleClientId },
-                        { "client_secret", googleClientSecret },
-                        { "redirect_uri", request.RedirectUri ?? "postmessage" },
-                        { "grant_type", "authorization_code" }
-                    };
-
-                    var tokenResponse = await httpClient.PostAsync("https://oauth2.googleapis.com/token", new FormUrlEncodedContent(tokenParams));
-                    if (!tokenResponse.IsSuccessStatusCode)
-                    {
-                        var errJson = await tokenResponse.Content.ReadAsStringAsync();
-                        Console.WriteLine($"[ERROR] Google Token Exchange Failed: {errJson}");
-                        return BadRequest(new { message = "Xác thực mã ủy quyền Google không thành công. Vui lòng thử lại!" });
-                    }
-
-                    var tokenData = await tokenResponse.Content.ReadFromJsonAsync<GoogleTokenResponse>();
-                    if (tokenData == null || string.IsNullOrWhiteSpace(tokenData.AccessToken))
-                    {
-                        return BadRequest(new { message = "Không nhận được Access Token từ máy chủ Google." });
-                    }
-
-                    // Gọi Google UserInfo API
-                    var infoReq = new HttpRequestMessage(HttpMethod.Get, "https://www.googleapis.com/oauth2/v2/userinfo");
-                    infoReq.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", tokenData.AccessToken);
-                    var infoRes = await httpClient.SendAsync(infoReq);
-
-                    if (!infoRes.IsSuccessStatusCode)
-                    {
-                        return BadRequest(new { message = "Không thể lấy thông tin hồ sơ từ Google." });
-                    }
-
-                    var profile = await infoRes.Content.ReadFromJsonAsync<GoogleUserInfo>();
-                    userEmail = profile?.Email;
-                    userName = profile?.Name;
-                    userPicture = profile?.Picture;
-                }
-                else
-                {
-                    // 1. Hỗ trợ giải mã Google ID Token (JWT định dạng 3 phần từ Google Sign-In SDK di động)
-                    if (request.Code.Contains(".") && request.Code.Split('.').Length == 3)
-                    {
-                        try
-                        {
-                            var parts = request.Code.Split('.');
-                            var base64 = parts[1].Replace('-', '+').Replace('_', '/');
-                            switch (base64.Length % 4)
-                            {
-                                case 2: base64 += "=="; break;
-                                case 3: base64 += "="; break;
-                            }
-                            var payloadBytes = Convert.FromBase64String(base64);
-                            var payloadJson = System.Text.Encoding.UTF8.GetString(payloadBytes);
-                            using var doc = System.Text.Json.JsonDocument.Parse(payloadJson);
-                            var root = doc.RootElement;
-                            if (root.TryGetProperty("email", out var emailProp)) userEmail = emailProp.GetString();
-                            if (root.TryGetProperty("name", out var nameProp)) userName = nameProp.GetString();
-                            if (root.TryGetProperty("picture", out var picProp)) userPicture = picProp.GetString();
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"[WARN] Lỗi đọc Google ID Token: {ex.Message}");
-                        }
-                    }
-
-                    // 2. Chế độ phát triển / Nhập Gmail trực tiếp
-                    if (string.IsNullOrWhiteSpace(userEmail))
-                    {
-                        if (request.Code.Contains("@"))
-                        {
-                            userEmail = request.Code.Trim().ToLowerInvariant();
-                            userName = userEmail.Split('@')[0];
-                        }
-                        else
-                        {
-                            return BadRequest(new { message = "Không thể xác thực mã Google. Vui lòng thử lại hoặc đăng nhập bằng tài khoản." });
-                        }
-                    }
-                }
-
-                if (string.IsNullOrWhiteSpace(userEmail))
-                {
-                    return BadRequest(new { message = "Không thể xác định địa chỉ Email từ tài khoản Google." });
-                }
-
-                var normalizedEmail = userEmail.Trim().ToLowerInvariant();
-
-                // 3. Tìm hoặc Tạo mới User trong PostgreSQL
-                var user = await _db.Users
-                    .Include(u => u.UserRoles)
-                    .ThenInclude(ur => ur.Role)
-                    .FirstOrDefaultAsync(u => u.Email == normalizedEmail);
-
-                if (user == null)
-                {
-                    user = new User
-                    {
-                        Email = normalizedEmail,
-                        PasswordHash = "GOOGLE_OAUTH",
-                        AvatarUrl = userPicture,
-                        AuthProvider = 1, // 1 = GOOGLE
-                        IsActive = true,
-                        VerifiedAt = DateTime.UtcNow,
-                        CreatedAt = DateTime.UtcNow,
-                        UpdatedAt = DateTime.UtcNow
-                    };
-                    _db.Users.Add(user);
-
-                    // Gán vai trò USER mặc định
-                    var userRole = await _db.Roles.FirstOrDefaultAsync(r => r.Name == "USER");
-                    if (userRole != null)
-                    {
-                        _db.UserRoles.Add(new UserRole
-                        {
-                            User = user,
-                            Role = userRole
-                        });
-                    }
-
-                    await _db.SaveChangesAsync();
-                }
-                else
-                {
-                    // Cập nhật auth_provider và avatar nếu có avatar mới từ Google
-                    user.AuthProvider = 1;
-                    if (!string.IsNullOrEmpty(userPicture) && user.AvatarUrl != userPicture)
-                    {
-                        user.AvatarUrl = userPicture;
-                    }
-                    user.UpdatedAt = DateTime.UtcNow;
-                    await _db.SaveChangesAsync();
-                }
-
-                if (!user.IsActive)
-                {
-                    _db.LoginLogs.Add(new LoginLog
-                    {
-                        UserId = user.Id,
-                        AttemptEmail = normalizedEmail,
-                        Status = "FAILED",
-                        IpAddress = clientIp,
-                        CreatedAt = DateTime.UtcNow
-                    });
-                    await _db.SaveChangesAsync();
-
-                    return Unauthorized(new { message = "Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên." });
-                }
-
-                // 4. Ghi log đăng nhập thành công
-                _db.LoginLogs.Add(new LoginLog
-                {
-                    UserId = user.Id,
-                    AttemptEmail = normalizedEmail,
-                    Status = "SUCCESS",
-                    IpAddress = clientIp,
-                    CreatedAt = DateTime.UtcNow
-                });
-
-                // 5. Cấp cặp Token nội bộ riêng của App: Access Token (30s) + Refresh Token (2m)
-                var googleUserRole = user.UserRoles.FirstOrDefault()?.Role.Name ?? "USER";
-                var accessToken = _tokenService.GenerateAccessToken(user.Email, googleUserRole);
-                var refreshToken = _tokenService.GenerateRefreshToken();
-
-                var newRefreshToken = new RefreshToken
-                {
-                    UserId = user.Id,
-                    Token = refreshToken,
-                    IpAddress = clientIp,
-                    UserAgent = userAgent,
-                    ExpiresAt = DateTime.UtcNow.AddMinutes(_configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes", 10080)),
-                    IsRevoked = false,
-                    CreatedAt = DateTime.UtcNow
-                };
-
-                _db.RefreshTokens.Add(newRefreshToken);
-                await _db.SaveChangesAsync();
-
-                SetAuthCookies(accessToken, refreshToken, true, 120);
-
-                var googleUserDto = new
-                {
-                    id = user.Id,
-                    email = user.Email,
-                    fullName = user.FullName,
-                    name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
-                    phoneNumber = user.PhoneNumber,
-                    gender = user.Gender,
-                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
-                    avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
-                    role = googleUserRole,
-                    authProvider = user.AuthProvider,
-                    isActive = user.IsActive
-                };
-
-                return Ok(new
-                {
-                    message = "Đăng nhập Google thành công!",
-                    user = googleUserDto,
-                    id = user.Id,
-                    email = user.Email,
-                    fullName = user.FullName,
-                    name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
-                    phoneNumber = user.PhoneNumber,
-                    gender = user.Gender,
-                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
-                    role = googleUserRole,
-                    avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
-                    authProvider = user.AuthProvider,
-                    isActive = user.IsActive,
-                    accessToken,
-                    refreshToken,
-                    expiresIn = 30
-                });
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ERROR] Lỗi xử lý đăng nhập Google: {ex.Message}");
-                return StatusCode(500, new { message = $"Lỗi máy chủ khi xác thực Google: {ex.Message}" });
-            }
-        }
-
-        [Authorize]
-        [HttpGet("me")]
-        public async Task<IActionResult> GetUserInfo()
-        {
-            var email = User.FindFirstValue(ClaimTypes.Email);
-            if (string.IsNullOrEmpty(email))
-                return Unauthorized(new { message = "Phiên làm việc không hợp lệ." });
-
-            var user = await _db.Users
-                .Include(u => u.UserRoles)
-                .ThenInclude(ur => ur.Role)
-                .FirstOrDefaultAsync(u => u.Email == email);
-
-            if (user == null || !user.IsActive)
-                return Unauthorized(new { message = "Người dùng không tồn tại hoặc đã bị khóa." });
-
-            var primaryRole = user.UserRoles.FirstOrDefault()?.Role.Name ?? "USER";
-
-            return Ok(new
-            {
-                message = "Xác thực phiên thành công (200 OK)!",
-                id = user.Id,
-                email = user.Email,
-                name = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Email.Split('@')[0],
-                fullName = user.FullName,
-                phoneNumber = user.PhoneNumber,
-                gender = user.Gender,
-                dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
-                avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
-                authProvider = user.AuthProvider,
-                authProviderName = user.AuthProvider == 1 ? "GOOGLE" : "LOCAL",
-                role = primaryRole,
-                isActive = user.IsActive,
-                verifiedAt = user.VerifiedAt,
-                isAuthenticated = true,
-                checkedAt = DateTime.UtcNow.ToString("HH:mm:ss")
-            });
-        }
-
-        private static string? NormalizeAvatarUrl(string? url)
-        {
-            if (string.IsNullOrWhiteSpace(url)) return url;
-            if (url.Contains("drive.google.com/file/d/"))
-            {
-                var match = System.Text.RegularExpressions.Regex.Match(url, @"/file/d/([a-zA-Z0-9_-]+)");
-                if (match.Success)
-                {
-                    var fileId = match.Groups[1].Value;
-                    var tParam = url.Contains("?t=") ? url.Substring(url.IndexOf("?t=")) : "";
-                    return $"https://lh3.googleusercontent.com/d/{fileId}{tParam}";
-                }
-            }
-            return url;
-        }
-
-        public class UpdateProfileViewModel
-        {
-            [Required(ErrorMessage = "Vui lòng nhập họ và tên.")]
-            [StringLength(50, MinimumLength = 2, ErrorMessage = "Họ và tên phải có độ dài từ 2 đến 50 ký tự.")]
-            public string FullName { get; set; } = string.Empty;
-
-            [Required(ErrorMessage = "Vui lòng nhập số điện thoại.")]
-            [RegularExpression(@"^(0[3|5|7|8|9])[0-9]{8}$", ErrorMessage = "Số điện thoại không hợp lệ (Phải gồm 10 số, bắt đầu bằng 03, 05, 07, 08, 09).")]
-            public string PhoneNumber { get; set; } = string.Empty;
-
-            [Required(ErrorMessage = "Vui lòng chọn giới tính.")]
-            [RegularExpression(@"^(Nam|Nữ|Khác)$", ErrorMessage = "Giới tính không hợp lệ. Vui lòng chọn Nam, Nữ hoặc Khác.")]
-            public string Gender { get; set; } = string.Empty;
-
-            [Required(ErrorMessage = "Vui lòng chọn ngày sinh.")]
-            public DateOnly? DateOfBirth { get; set; }
-        }
-
-        [Authorize]
-        [HttpPut("me/profile")]
-        public async Task<IActionResult> UpdateProfile([FromBody] UpdateProfileViewModel model)
-        {
-            if (!ModelState.IsValid)
-            {
-                var firstError = ModelState.Values
-                    .SelectMany(v => v.Errors)
-                    .Select(e => e.ErrorMessage)
-                    .FirstOrDefault(msg => !string.IsNullOrEmpty(msg));
-                return BadRequest(new { message = firstError ?? "Dữ liệu cập nhật không hợp lệ." });
-            }
-
-            var email = User.FindFirstValue(ClaimTypes.Email);
-            if (string.IsNullOrEmpty(email))
-                return Unauthorized(new { message = "Phiên làm việc không hợp lệ." });
-
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
-            if (user == null || !user.IsActive)
-                return Unauthorized(new { message = "Người dùng không tồn tại hoặc đã bị khóa." });
-
-            user.FullName = model.FullName.Trim();
-            user.PhoneNumber = model.PhoneNumber.Trim();
-            user.Gender = model.Gender.Trim();
-            user.DateOfBirth = model.DateOfBirth;
-            user.UpdatedAt = DateTime.UtcNow;
-
+            await LogLoginAsync(user, email, "FAILED");
             await _db.SaveChangesAsync();
-
-            return Ok(new
-            {
-                message = "Cập nhật thông tin cá nhân thành công!",
-                user = new
-                {
-                    id = user.Id,
-                    email = user.Email,
-                    fullName = user.FullName,
-                    name = user.FullName,
-                    phoneNumber = user.PhoneNumber,
-                    gender = user.Gender,
-                    dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"),
-                    avatarUrl = NormalizeAvatarUrl(user.AvatarUrl),
-                    authProvider = user.AuthProvider,
-                    isActive = user.IsActive
-                }
-            });
+            return Unauthorized(Error("Invalid email or password."));
         }
-
-        [Authorize]
-        [HttpPost("auth/change-password")]
-        public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordViewModel model)
-        {
-            if (!ModelState.IsValid)
-                return BadRequest(ModelState);
-
-            var email = User.FindFirstValue(ClaimTypes.Email);
-            if (string.IsNullOrEmpty(email))
-                return Unauthorized(new { message = "Phiên làm việc không hợp lệ." });
-
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == email);
-            if (user == null || !user.IsActive)
-                return Unauthorized(new { message = "Tài khoản không tồn tại hoặc đã bị khóa." });
-
-            if (user.AuthProvider == 1)
-                return BadRequest(new { message = "Tài khoản đăng nhập bằng Google OAuth không sử dụng mật khẩu." });
-
-            // Kiểm tra mật khẩu hiện tại
-            var isCurrentPasswordValid = BCrypt.Net.BCrypt.Verify(model.CurrentPassword, user.PasswordHash);
-            if (!isCurrentPasswordValid)
-                return BadRequest(new { message = "Mật khẩu hiện tại không chính xác." });
-
-            if (model.CurrentPassword == model.NewPassword)
-                return BadRequest(new { message = "Mật khẩu mới không được trùng với mật khẩu hiện tại." });
-
-            // Băm mật khẩu mới bằng BCrypt
-            user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(model.NewPassword, workFactor: 11);
-            user.UpdatedAt = DateTime.UtcNow;
-
-            await _db.SaveChangesAsync();
-
-            return Ok(new { message = "Đổi mật khẩu thành công!" });
-        }
-
-        [HttpPost("logout")]
-        public IActionResult Logout()
-        {
-            Response.Cookies.Delete("AccessToken");
-            Response.Cookies.Delete("RefreshToken");
-            return Ok(new { message = "Đăng xuất thành công!" });
-        }
-
-        /// <summary>
-        /// Rotate Token: Cấp mới 1 cặp (Access Token 30s + Refresh Token 2m) khi Access Token hết hạn.
-        /// </summary>
-        [HttpPost("refresh-token")]
-        public async Task<IActionResult> RefreshToken([FromBody] RefreshTokenRequest? body)
-        {
-            var oldAccessToken = Request.Cookies["AccessToken"] ?? body?.AccessToken;
-            var refreshToken = Request.Cookies["RefreshToken"] ?? body?.RefreshToken;
-
-            if (string.IsNullOrEmpty(oldAccessToken) && Request.Headers.ContainsKey("Authorization"))
-            {
-                var authHeader = Request.Headers.Authorization.ToString();
-                if (authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-                {
-                    oldAccessToken = authHeader.Substring("Bearer ".Length).Trim();
-                }
-            }
-
-            if (string.IsNullOrEmpty(oldAccessToken) || string.IsNullOrEmpty(refreshToken))
-                return Unauthorized(new { message = "Thiếu Access Token hoặc Refresh Token." });
-
-            var principal = _tokenService.GetPrincipalFromExpiredToken(oldAccessToken);
-            var email = principal?.FindFirstValue(ClaimTypes.Email);
-
-            if (string.IsNullOrEmpty(email))
-                return Unauthorized(new { message = "Access Token không hợp lệ." });
-
-            var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString();
-            var userAgent = Request.Headers.UserAgent.ToString();
-
-            // Tìm Refresh Token trong bảng refresh_tokens của PostgreSQL
-            var storedToken = await _db.RefreshTokens
-                .Include(rt => rt.User)
-                    .ThenInclude(u => u.UserRoles)
-                    .ThenInclude(ur => ur.Role)
-                .FirstOrDefaultAsync(x => x.User.Email == email && x.Token == refreshToken);
-
-            // Kiểm tra Refresh Token: Hết hạn hoặc đã bị hủy
-            if (storedToken == null || storedToken.IsRevoked || storedToken.ExpiresAt <= DateTime.UtcNow)
-            {
-                if (storedToken != null)
-                {
-                    storedToken.IsRevoked = true;
-                    await _db.SaveChangesAsync();
-                }
-                return Unauthorized(new { message = "Phiên đăng nhập đã hết hạn hoặc không hợp lệ. Vui lòng đăng nhập lại." });
-            }
-
-            // Kiểm tra xem tài khoản người dùng có đang bị khóa (is_active = false) không
-            if (storedToken.User == null || !storedToken.User.IsActive)
-            {
-                storedToken.IsRevoked = true;
-                await _db.SaveChangesAsync();
-                return Unauthorized(new { message = "Tài khoản của bạn đã bị khóa. Vui lòng liên hệ quản trị viên." });
-            }
-
-            // Rotate Token: Cấp CẢ CẶP Access mới + Refresh mới
-            var refreshUserRole = storedToken.User.UserRoles.FirstOrDefault()?.Role.Name ?? "USER";
-            var newAccessToken = _tokenService.GenerateAccessToken(email, refreshUserRole);
-            var newRefreshToken = _tokenService.GenerateRefreshToken();
-
-            // Cập nhật Token mới và gia hạn mới vào database (Sliding Window)
-            storedToken.Token = newRefreshToken;
-            storedToken.ExpiresAt = DateTime.UtcNow.AddMinutes(_configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes", 10080));
-            storedToken.IpAddress = clientIp;
-            storedToken.UserAgent = userAgent;
-
-            await _db.SaveChangesAsync();
-
-            SetAuthCookies(newAccessToken, newRefreshToken, true, 120);
-
-            return Ok(new
-            {
-                message = "Rotate Token thành công!",
-                accessToken = newAccessToken,
-                refreshToken = newRefreshToken,
-                expiresIn = _configuration.GetValue<int>("JwtSettings:AccessTokenSeconds", 3600)
-            });
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // ADMIN-ONLY ENDPOINTS  [Authorize(Roles = "ADMIN")]
-        // ─────────────────────────────────────────────────────────────────────
-
-        [Authorize(Roles = "ADMIN")]
-        [HttpGet("admin/stats")]
-        public async Task<IActionResult> AdminGetStats()
-        {
-            var totalUsers = await _db.Users.CountAsync();
-            var totalActive = await _db.Users.CountAsync(u => u.IsActive);
-            var totalLocked = await _db.Users.CountAsync(u => !u.IsActive);
-
-            var since7Days = DateTime.UtcNow.AddDays(-7);
-            var successLogins = await _db.LoginLogs.CountAsync(l => l.Status == "SUCCESS" && l.CreatedAt >= since7Days);
-            var failedLogins = await _db.LoginLogs.CountAsync(l => l.Status == "FAILED" && l.CreatedAt >= since7Days);
-            var newRegistrations = await _db.Users.CountAsync(u => u.CreatedAt >= since7Days);
-
-            return Ok(new
-            {
-                totalUsers,
-                totalActive,
-                totalLocked,
-                last7Days = new
-                {
-                    successLogins,
-                    failedLogins,
-                    newRegistrations
-                }
-            });
-        }
-
-        [Authorize(Roles = "ADMIN")]
-        [HttpGet("admin/users")]
-        public async Task<IActionResult> AdminGetUsers()
-        {
-            var users = await _db.Users
-                .Include(u => u.UserRoles)
-                .ThenInclude(ur => ur.Role)
-                .OrderByDescending(u => u.CreatedAt)
-                .Select(u => new
-                {
-                    id = u.Id,
-                    email = u.Email,
-                    fullName = u.FullName,
-                    phoneNumber = u.PhoneNumber,
-                    gender = u.Gender,
-                    dateOfBirth = u.DateOfBirth.HasValue ? u.DateOfBirth.Value.ToString("yyyy-MM-dd") : null,
-                    role = u.UserRoles.FirstOrDefault() != null ? u.UserRoles.First().Role.Name : "USER",
-                    authProvider = u.AuthProvider,
-                    authProviderName = u.AuthProvider == 1 ? "GOOGLE" : "LOCAL",
-                    isActive = u.IsActive,
-                    avatarUrl = u.AvatarUrl,
-                    createdAt = u.CreatedAt
-                })
-                .ToListAsync();
-
-            return Ok(users);
-        }
-
-        [Authorize(Roles = "ADMIN")]
-        [HttpGet("admin/logs")]
-        public async Task<IActionResult> AdminGetLogs()
-        {
-            var logs = await _db.LoginLogs
-                .OrderByDescending(l => l.CreatedAt)
-                .Take(50)
-                .Select(l => new
-                {
-                    id = l.Id,
-                    attemptEmail = l.AttemptEmail,
-                    status = l.Status,
-                    ipAddress = l.IpAddress,
-                    createdAt = l.CreatedAt
-                })
-                .ToListAsync();
-
-            return Ok(logs);
-        }
-
-        [Authorize(Roles = "ADMIN")]
-        [HttpPut("admin/users/{id}/toggle-active")]
-        public async Task<IActionResult> AdminToggleUserActive(int id)
-        {
-            var user = await _db.Users
-                .Include(u => u.UserRoles)
-                .ThenInclude(ur => ur.Role)
-                .FirstOrDefaultAsync(u => u.Id == id);
-
-            if (user == null)
-                return NotFound(new { message = "Không tìm thấy người dùng." });
-
-            // Không cho phép khóa tài khoản ADMIN
-            var userRole = user.UserRoles.FirstOrDefault()?.Role.Name ?? "USER";
-            if (userRole == "ADMIN")
-                return BadRequest(new { message = "Không thể khóa tài khoản Admin." });
-
-            user.IsActive = !user.IsActive;
-            user.UpdatedAt = DateTime.UtcNow;
-
-            // Nếu bị khóa → thu hồi toàn bộ refresh token
-            if (!user.IsActive)
-            {
-                var tokens = await _db.RefreshTokens
-                    .Where(t => t.UserId == user.Id && !t.IsRevoked)
-                    .ToListAsync();
-                tokens.ForEach(t => t.IsRevoked = true);
-            }
-
-            await _db.SaveChangesAsync();
-
-            return Ok(new
-            {
-                message = user.IsActive ? $"Đã mở khóa tài khoản {user.Email}." : $"Đã khóa tài khoản {user.Email}.",
-                isActive = user.IsActive
-            });
-        }
-
-        [Authorize(Roles = "ADMIN")]
-        [HttpDelete("admin/users/{id}")]
-        public async Task<IActionResult> AdminDeleteUser(int id)
-        {
-            var user = await _db.Users
-                .Include(u => u.UserRoles)
-                .ThenInclude(ur => ur.Role)
-                .FirstOrDefaultAsync(u => u.Id == id);
-
-            if (user == null)
-                return NotFound(new { message = "Không tìm thấy người dùng." });
-
-            // Tuyệt đối không cho phép xóa tài khoản ADMIN
-            var userRole = user.UserRoles.FirstOrDefault()?.Role.Name ?? "USER";
-            if (userRole == "ADMIN" || user.Email.Equals("admin@gmail.com", StringComparison.OrdinalIgnoreCase))
-                return BadRequest(new { message = "Không thể xóa tài khoản Quản trị viên hệ thống." });
-
-            var userEmail = user.Email;
-
-            // Xóa người dùng trong PostgreSQL (Cascade delete sẽ tự dọn dẹp user_roles, refresh_tokens)
-            _db.Users.Remove(user);
-            await _db.SaveChangesAsync();
-
-            Console.WriteLine($"[ADMIN] 🗑️ Đã xóa vĩnh viễn tài khoản: {userEmail}");
-
-            return Ok(new
-            {
-                message = $"Đã xóa vĩnh viễn tài khoản {userEmail} khỏi cơ sở dữ liệu thành công!",
-                deletedId = id
-            });
-        }
-
-        private void SetAuthCookies(string accessToken, string refreshToken, bool rememberMe, int refreshExpiresSeconds = 120)
-        {
-            Response.Cookies.Append("AccessToken", accessToken, new CookieOptions
-            {
-                HttpOnly = true,
-                Secure = true,
-                SameSite = SameSiteMode.Strict,
-                Expires = DateTime.UtcNow.AddSeconds(30) // Access token cookie: 30s
-            });
-
-            var refreshOptions = new CookieOptions
-            {
-                HttpOnly = true,
-                Secure = true,
-                SameSite = SameSiteMode.Strict,
-                Expires = DateTime.UtcNow.AddSeconds(refreshExpiresSeconds) // Refresh token cookie: 2 phút
-            };
-
-            Response.Cookies.Append("RefreshToken", refreshToken, refreshOptions);
-        }
+        await LogLoginAsync(user, email, "SUCCESS");
+        return Ok(await CreateSessionResponseAsync(user));
     }
+
+    [HttpPost("auth/register")]
+    public async Task<IActionResult> Register([FromBody] RegisterViewModel model)
+    {
+        if (!ModelState.IsValid) return ValidationProblem(ModelState);
+        if (model.Password != model.ConfirmPassword) return BadRequest(Error("Passwords do not match."));
+        if (Encoding.UTF8.GetByteCount(model.Password) > 72) return BadRequest(Error("Password must not exceed 72 UTF-8 bytes."));
+        var email = NormalizeEmail(model.Email);
+        if (!email.EndsWith("@gmail.com", StringComparison.Ordinal)) return BadRequest(Error("Only Gmail addresses are supported."));
+        if (await _db.Users.AnyAsync(x => x.Email == email)) return Conflict(Error("This email is already registered."));
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        if (!model.DateOfBirth.HasValue || model.DateOfBirth > today) return BadRequest(Error("Date of birth is invalid."));
+        var age = today.Year - model.DateOfBirth.Value.Year;
+        if (model.DateOfBirth.Value > today.AddYears(-age)) age--;
+        if (age is < 6 or > 120) return BadRequest(Error("Date of birth is invalid."));
+        var role = await _db.Roles.SingleOrDefaultAsync(r => r.Name == AppRoles.User);
+        if (role is null) return StatusCode(503, Error("The service has not been initialized."));
+        var user = new AppUser { Email = email, PasswordHash = BCrypt.Net.BCrypt.HashPassword(model.Password, workFactor: 11), FullName = model.FullName.Trim(),
+            PhoneNumber = model.PhoneNumber.Trim(), Gender = model.Gender.Trim(), DateOfBirth = model.DateOfBirth, AuthProvider = 0, HasLocalProvider = true, IsActive = true,
+            VerifiedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
+        _db.Users.Add(user); _db.UserRoles.Add(new UserRole { User = user, Role = role });
+        await LogLoginAsync(user, email, "SUCCESS"); await _db.SaveChangesAsync();
+        return StatusCode(StatusCodes.Status201Created, new { success = true, message = "Registration completed.", email });
+    }
+
+    [HttpPost("auth/google")]
+    public async Task<IActionResult> GoogleLogin([FromBody] GoogleAuthRequest request)
+    {
+        try
+        {
+            var identity = await VerifyGoogleCredentialAsync(request);
+            if (identity is null) return BadRequest(Error("The Google credential is invalid or expired."));
+            var email = NormalizeEmail(identity.Email);
+            var user = await UserWithRoles().SingleOrDefaultAsync(x => x.GoogleSubject == identity.Subject)
+                ?? await UserWithRoles().SingleOrDefaultAsync(x => x.Email == email);
+            if (user is null)
+            {
+                var role = await _db.Roles.SingleOrDefaultAsync(r => r.Name == AppRoles.User);
+                if (role is null) return StatusCode(503, Error("The service has not been initialized."));
+                user = new AppUser { Email = email, PasswordHash = BCrypt.Net.BCrypt.HashPassword(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), workFactor: 11),
+                    FullName = identity.Name, AvatarUrl = identity.Picture, AuthProvider = 1, HasGoogleProvider = true, GoogleSubject = identity.Subject, IsActive = true, VerifiedAt = DateTime.UtcNow,
+                    CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow, UserRoles = [new UserRole { Role = role }] };
+                _db.Users.Add(user); await _db.SaveChangesAsync();
+            }
+            else
+            {
+                // AuthProvider remains the legacy account-origin indicator: do not turn a LOCAL account into GOOGLE.
+                if (user.GoogleSubject is null && !identity.IsAuthoritativeEmail)
+                    return BadRequest(Error("Please use your existing sign-in method to link this Google account."));
+                if (!user.IsActive) return Unauthorized(Error("This account is locked."));
+                if (!string.IsNullOrWhiteSpace(user.GoogleSubject) && user.GoogleSubject != identity.Subject) return BadRequest(Error("This Google account is linked to a different identity."));
+                user.HasGoogleProvider = true; user.GoogleSubject ??= identity.Subject;
+                if (!string.IsNullOrWhiteSpace(identity.Picture)) user.AvatarUrl = identity.Picture;
+                user.UpdatedAt = DateTime.UtcNow;
+            }
+            if (!user.IsActive) { await LogLoginAsync(user, email, "FAILED"); await _db.SaveChangesAsync(); return Unauthorized(Error("This account is locked.")); }
+            await LogLoginAsync(user, email, "SUCCESS"); await _db.SaveChangesAsync();
+            return Ok(await CreateSessionResponseAsync(user));
+        }
+        catch (InvalidJwtException) { return BadRequest(Error("The Google credential is invalid or expired.")); }
+        catch (HttpRequestException ex) { _logger.LogWarning(ex, "Google authentication is unavailable"); return StatusCode(503, Error("Google authentication is temporarily unavailable.")); }
+    }
+
+    [Authorize]
+    [HttpGet("me")]
+    public async Task<IActionResult> Me()
+    {
+        var user = await CurrentUserAsync();
+        return user is null || !user.IsActive ? Unauthorized(Error("Session is invalid.")) : Ok(ToUserDto(user));
+    }
+
+    [Authorize]
+    [HttpPut("me/profile")]
+    public async Task<IActionResult> UpdateProfile([FromBody] UpdateProfileViewModel model)
+    {
+        if (!ModelState.IsValid) return ValidationProblem(ModelState);
+        var user = await CurrentUserAsync();
+        if (user is null || !user.IsActive) return Unauthorized(Error("Session is invalid."));
+        user.FullName = model.FullName.Trim(); user.PhoneNumber = model.PhoneNumber.Trim(); user.Gender = model.Gender.Trim(); user.DateOfBirth = model.DateOfBirth; user.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(); return Ok(new { success = true, message = "Profile updated.", user = ToUserDto(user) });
+    }
+
+    [Authorize]
+    [HttpPost("auth/change-password")]
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordViewModel model)
+    {
+        if (!ModelState.IsValid) return ValidationProblem(ModelState);
+        var user = await CurrentUserAsync();
+        if (user is null || !user.IsActive) return Unauthorized(Error("Session is invalid."));
+        if (!user.HasLocalProvider) return BadRequest(Error("Google-only accounts do not have a local password."));
+        if (!BCrypt.Net.BCrypt.Verify(model.CurrentPassword, user.PasswordHash)) return BadRequest(Error("Current password is incorrect."));
+        if (model.CurrentPassword == model.NewPassword) return BadRequest(Error("New password must differ from the current password."));
+        if (Encoding.UTF8.GetByteCount(model.NewPassword) > 72) return BadRequest(Error("Password must not exceed 72 UTF-8 bytes."));
+        user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(model.NewPassword, workFactor: 11); user.UpdatedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync(); return Ok(new { success = true, message = "Password updated." });
+    }
+
+    [HttpPost("refresh-token")]
+    public async Task<IActionResult> RefreshToken([FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] RefreshTokenRequest? request)
+    {
+        var access = Request.Cookies["AccessToken"] ?? request?.AccessToken;
+        var rawRefresh = Request.Cookies["RefreshToken"] ?? request?.RefreshToken;
+        if (string.IsNullOrWhiteSpace(rawRefresh)) return Unauthorized(Error("A valid session is required."));
+        var email = string.IsNullOrWhiteSpace(access) ? null : _tokens.GetPrincipalFromExpiredToken(access)?.FindFirstValue(ClaimTypes.Email);
+        if (!string.IsNullOrWhiteSpace(access) && string.IsNullOrWhiteSpace(email)) return Unauthorized(Error("A valid session is required."));
+        await using var transaction = await _db.Database.BeginTransactionAsync();
+        var stored = await _db.RefreshTokens.Include(x => x.User).ThenInclude(x => x.UserRoles).ThenInclude(x => x.Role)
+            .SingleOrDefaultAsync(x => x.Token == HashRefreshToken(rawRefresh));
+        if (stored is not null && !string.IsNullOrWhiteSpace(email) && !string.Equals(stored.User.Email, email, StringComparison.OrdinalIgnoreCase))
+            stored = null;
+        if (stored is null || stored.IsRevoked || stored.ExpiresAt <= DateTime.UtcNow || !stored.User.IsActive)
+        {
+            if (stored is not null) { stored.IsRevoked = true; await _db.SaveChangesAsync(); }
+            await transaction.CommitAsync(); return Unauthorized(Error("Session has expired. Please sign in again."));
+        }
+        // Atomically claim the token: two requests may both read it before the transaction begins to write.
+        // The predicate is rechecked under the row lock, so only one refresh can consume this token.
+        var consumed = await _db.RefreshTokens
+            .Where(x => x.Id == stored.Id && !x.IsRevoked && x.ExpiresAt > DateTime.UtcNow && x.User.IsActive)
+            .ExecuteUpdateAsync(update => update.SetProperty(x => x.IsRevoked, true));
+        if (consumed != 1) return Unauthorized(Error("This refresh token has already been used."));
+        var newRawRefresh = _tokens.GenerateRefreshToken(); _db.RefreshTokens.Add(NewRefreshToken(stored.UserId, newRawRefresh));
+        await _db.SaveChangesAsync(); await transaction.CommitAsync();
+        return Ok(CreateSessionResponse(stored.User, newRawRefresh));
+    }
+
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout([FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] RefreshTokenRequest? request)
+    {
+        var rawRefresh = Request.Cookies["RefreshToken"] ?? request?.RefreshToken;
+        if (!string.IsNullOrWhiteSpace(rawRefresh))
+        {
+            var stored = await _db.RefreshTokens.SingleOrDefaultAsync(x => x.Token == HashRefreshToken(rawRefresh));
+            if (stored is not null && !stored.IsRevoked) { stored.IsRevoked = true; await _db.SaveChangesAsync(); }
+        }
+        DeleteAuthCookies(); return Ok(new { success = true, message = "Signed out." });
+    }
+
+    [Authorize(Roles = AppRoles.Admin)]
+    [HttpGet("admin/stats")]
+    public async Task<IActionResult> AdminStats() => Ok(new { totalUsers = await _db.Users.CountAsync(), totalActive = await _db.Users.CountAsync(x => x.IsActive), totalLocked = await _db.Users.CountAsync(x => !x.IsActive),
+        last7Days = new { successLogins = await _db.LoginLogs.CountAsync(x => x.Status == "SUCCESS" && x.CreatedAt >= DateTime.UtcNow.AddDays(-7)), failedLogins = await _db.LoginLogs.CountAsync(x => x.Status == "FAILED" && x.CreatedAt >= DateTime.UtcNow.AddDays(-7)), newRegistrations = await _db.Users.CountAsync(x => x.CreatedAt >= DateTime.UtcNow.AddDays(-7)) } });
+
+    [Authorize(Roles = AppRoles.Admin)]
+    [HttpGet("admin/logs")]
+    public async Task<IActionResult> AdminLogs() => Ok(await _db.LoginLogs.AsNoTracking().OrderByDescending(x => x.CreatedAt).Take(50)
+        .Select(x => new { id = x.Id, attemptEmail = x.AttemptEmail, status = x.Status, ipAddress = x.IpAddress, createdAt = x.CreatedAt }).ToListAsync());
+
+    [Authorize(Roles = AppRoles.Admin)]
+    [HttpGet("admin/users")]
+    public async Task<IActionResult> AdminUsers([FromQuery] string? search)
+    {
+        var query = UserWithRoles().AsNoTracking();
+        if (!string.IsNullOrWhiteSpace(search)) { var term = search.Trim(); query = query.Where(x => EF.Functions.ILike(x.Email, $"%{term}%") || (x.FullName != null && EF.Functions.ILike(x.FullName, $"%{term}%"))); }
+        return Ok((await query.OrderByDescending(x => x.CreatedAt).ToListAsync()).Select(ToUserDto));
+    }
+
+    [Authorize(Roles = AppRoles.Admin)]
+    [HttpPut("admin/users/{id:int}/status")]
+    public async Task<IActionResult> SetUserStatus(int id, [FromBody] UpdateUserStatusRequest request)
+    {
+        var user = await UserWithRoles().SingleOrDefaultAsync(x => x.Id == id);
+        if (user is null) return NotFound(Error("User not found."));
+        if (PrimaryRole(user) == AppRoles.Admin) return BadRequest(Error("Administrator accounts cannot be locked."));
+        user.IsActive = request.IsActive!.Value; user.UpdatedAt = DateTime.UtcNow;
+        if (!user.IsActive) await _db.RefreshTokens.Where(x => x.UserId == id && !x.IsRevoked).ExecuteUpdateAsync(x => x.SetProperty(t => t.IsRevoked, true));
+        await _db.SaveChangesAsync(); return Ok(new { success = true, isActive = user.IsActive });
+    }
+
+    [Authorize(Roles = AppRoles.Admin)]
+    [HttpPut("admin/users/{id:int}/role")]
+    public async Task<IActionResult> SetUserRole(int id, [FromBody] UpdateUserRoleRequest request)
+    {
+        var name = request.Role?.Trim().ToUpperInvariant(); if (name is not (AppRoles.Admin or AppRoles.User)) return BadRequest(Error("Role must be ADMIN or USER."));
+        await using var transaction = await _db.Database.BeginTransactionAsync();
+        // Serialize demotions so concurrent administrators cannot remove the last active admin.
+        await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(741003002);");
+        var user = await UserWithRoles().SingleOrDefaultAsync(x => x.Id == id); var role = await _db.Roles.SingleOrDefaultAsync(x => x.Name == name);
+        if (user is null || role is null) return NotFound(Error("User or role not found."));
+        if (PrimaryRole(user) == AppRoles.Admin && name == AppRoles.User &&
+            !await _db.Users.AnyAsync(x => x.Id != id && x.IsActive && x.UserRoles.Any(r => r.Role.Name == AppRoles.Admin)))
+            return BadRequest(Error("The last active administrator cannot be demoted."));
+        var removed = user.UserRoles.Where(x => x.RoleId != role.Id).ToList();
+        _db.UserRoles.RemoveRange(removed);
+        var alreadyAssigned = user.UserRoles.Any(x => x.RoleId == role.Id);
+        if (!alreadyAssigned) _db.UserRoles.Add(new UserRole { UserId = id, RoleId = role.Id });
+        if (removed.Count > 0 || !alreadyAssigned)
+        {
+            user.UpdatedAt = DateTime.UtcNow;
+            await _db.RefreshTokens.Where(x => x.UserId == id && !x.IsRevoked).ExecuteUpdateAsync(x => x.SetProperty(t => t.IsRevoked, true));
+        }
+        await _db.SaveChangesAsync(); await transaction.CommitAsync();
+        return Ok(new { success = true, role = name });
+    }
+
+    [Authorize(Roles = AppRoles.Admin)]
+    [HttpDelete("admin/users/{id:int}")]
+    public async Task<IActionResult> DeleteUser(int id)
+    {
+        var user = await UserWithRoles().SingleOrDefaultAsync(x => x.Id == id);
+        if (user is null) return NotFound(Error("User not found.")); if (PrimaryRole(user) == AppRoles.Admin) return BadRequest(Error("Administrator accounts cannot be deleted."));
+        _db.Users.Remove(user); await _db.SaveChangesAsync(); return Ok(new { success = true, deletedId = id });
+    }
+
+    private async Task<GoogleIdentity?> VerifyGoogleCredentialAsync(GoogleAuthRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Code) == string.IsNullOrWhiteSpace(request.IdToken)) return null;
+        var clientId = _configuration["Authentication:Google:ClientId"]; if (string.IsNullOrWhiteSpace(clientId)) throw new HttpRequestException("Google client ID missing");
+        var idToken = request.IdToken;
+        if (string.IsNullOrWhiteSpace(idToken) && !string.IsNullOrWhiteSpace(request.Code))
+        {
+            var secret = _configuration["Authentication:Google:ClientSecret"]; if (string.IsNullOrWhiteSpace(secret)) return null;
+            var values = new Dictionary<string, string> { ["code"] = request.Code, ["client_id"] = clientId, ["client_secret"] = secret, ["redirect_uri"] = request.RedirectUri ?? "postmessage", ["grant_type"] = "authorization_code" };
+            var response = await _httpClients.CreateClient().PostAsync("https://oauth2.googleapis.com/token", new FormUrlEncodedContent(values)); if (!response.IsSuccessStatusCode) return null;
+            idToken = (await response.Content.ReadFromJsonAsync<GoogleTokenResponse>())?.IdToken;
+        }
+        if (string.IsNullOrWhiteSpace(idToken)) return null;
+        var allowedAudiences = _configuration.GetSection("Authentication:Google:AllowedClientIds").Get<string[]>() ?? [];
+        allowedAudiences = allowedAudiences.Append(clientId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).ToArray();
+        var payload = await GoogleJsonWebSignature.ValidateAsync(idToken, new GoogleJsonWebSignature.ValidationSettings { Audience = allowedAudiences });
+        if (!new EmailAddressAttribute().IsValid(payload.Email) || string.IsNullOrWhiteSpace(payload.Subject) || payload.EmailVerified != true ||
+            payload.ExpirationTimeSeconds <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
+        var authoritativeEmail = payload.Email.EndsWith("@gmail.com", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(payload.HostedDomain);
+        return new GoogleIdentity(payload.Email, payload.Subject, payload.Name, payload.Picture, authoritativeEmail);
+    }
+
+    private async Task<object> CreateSessionResponseAsync(AppUser user) { var refresh = _tokens.GenerateRefreshToken(); _db.RefreshTokens.Add(NewRefreshToken(user.Id, refresh)); await _db.SaveChangesAsync(); return CreateSessionResponse(user, refresh); }
+    private object CreateSessionResponse(AppUser user, string refresh)
+    {
+        var access = _tokens.GenerateAccessToken(user.Email, PrimaryRole(user));
+        SetAuthCookies(access, refresh);
+        var metadata = new { success = true, message = "Authenticated.", user = ToUserDto(user), accessTokenExpiresIn = AccessSeconds, refreshTokenExpiresIn = RefreshMinutes * 60 };
+        // Only native clients explicitly opt into body tokens; browsers use HttpOnly cookies exclusively.
+        return Request.Headers["X-Client-Platform"] == "mobile"
+            ? new { metadata.success, metadata.message, metadata.user, accessToken = access, refreshToken = refresh, metadata.accessTokenExpiresIn, metadata.refreshTokenExpiresIn }
+            : metadata;
+    }
+    private RefreshToken NewRefreshToken(int userId, string raw) => new() { UserId = userId, Token = HashRefreshToken(raw), IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString(), UserAgent = Request.Headers.UserAgent.ToString(), ExpiresAt = DateTime.UtcNow.AddMinutes(RefreshMinutes), CreatedAt = DateTime.UtcNow };
+    private IQueryable<AppUser> UserWithRoles() => _db.Users.Include(x => x.UserRoles).ThenInclude(x => x.Role);
+    private async Task<AppUser?> CurrentUserAsync() { var email = User.FindFirstValue(ClaimTypes.Email); return string.IsNullOrWhiteSpace(email) ? null : await UserWithRoles().SingleOrDefaultAsync(x => x.Email == email); }
+    private async Task LogLoginAsync(AppUser? user, string email, string status) => await _db.LoginLogs.AddAsync(new LoginLog { User = user, AttemptEmail = email, Status = status, IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString(), CreatedAt = DateTime.UtcNow });
+    private static string NormalizeEmail(string? value) => (value ?? string.Empty).Trim().ToLowerInvariant();
+    private static string PrimaryRole(AppUser user) => user.UserRoles.Any(x => x.Role.Name == AppRoles.Admin) ? AppRoles.Admin : AppRoles.User;
+    private static string HashRefreshToken(string raw) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)));
+    private static object Error(string message) => new { success = false, message };
+    private int AccessSeconds => _configuration.GetValue<int>("JwtSettings:AccessTokenSeconds"); private int RefreshMinutes => _configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes");
+    private object ToUserDto(AppUser user) => new { id = user.Id, email = user.Email, fullName = user.FullName, name = string.IsNullOrWhiteSpace(user.FullName) ? user.Email.Split('@')[0] : user.FullName, phoneNumber = user.PhoneNumber, gender = user.Gender, dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"), avatarUrl = user.AvatarUrl, role = PrimaryRole(user), authProvider = user.AuthProvider, authProviderName = user.AuthProvider == 1 ? "GOOGLE" : "LOCAL", loginProviders = new { local = user.HasLocalProvider, google = user.HasGoogleProvider }, isActive = user.IsActive, verifiedAt = user.VerifiedAt, createdAt = user.CreatedAt, updatedAt = user.UpdatedAt };
+    private void SetAuthCookies(string access, string refresh)
+    {
+        Response.Cookies.Append("AccessToken", access, CookieOptions(DateTimeOffset.UtcNow.AddSeconds(AccessSeconds)));
+        Response.Cookies.Append("RefreshToken", refresh, CookieOptions(DateTimeOffset.UtcNow.AddMinutes(RefreshMinutes)));
+    }
+
+    private CookieOptions CookieOptions(DateTimeOffset? expires = null)
+    {
+        var sameSite = Enum.TryParse<SameSiteMode>(_configuration["Authentication:CookieSameSite"], true, out var configured)
+            ? configured : SameSiteMode.Lax;
+        var secure = !HttpContext.RequestServices.GetRequiredService<IHostEnvironment>().IsDevelopment() || sameSite == SameSiteMode.None;
+        return new CookieOptions { HttpOnly = true, Secure = secure, SameSite = sameSite, Path = "/", Expires = expires };
+    }
+
+    private void DeleteAuthCookies()
+    {
+        Response.Cookies.Delete("AccessToken", CookieOptions());
+        Response.Cookies.Delete("RefreshToken", CookieOptions());
+    }
+    private sealed record GoogleIdentity(string Email, string Subject, string? Name, string? Picture, bool IsAuthoritativeEmail);
 }
+
+public sealed class UpdateUserStatusRequest { [Required] public bool? IsActive { get; set; } }
+public sealed class UpdateUserRoleRequest { public string? Role { get; set; } }

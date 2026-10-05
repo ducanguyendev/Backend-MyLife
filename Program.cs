@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -7,6 +8,7 @@ using MyLife.Shared.Data;
 using MyLife.Features.Auth.Services;
 using MyLife.Features.Avatar.Services;
 using MyLife.Features.FamilyTree.Services;
+using MyLife.Shared.Security;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -22,17 +24,33 @@ builder.Logging.AddSimpleConsole(options =>
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-builder.Services.AddControllers();
-builder.Services.AddHttpClient();
+builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
+{
+    options.InvalidModelStateResponseFactory = context =>
+    {
+        var errors = context.ModelState
+            .Where(entry => entry.Value?.Errors.Count > 0)
+            .ToDictionary(entry => entry.Key, entry => entry.Value!.Errors.Select(error => string.IsNullOrWhiteSpace(error.ErrorMessage) ? "Invalid value." : error.ErrorMessage));
+        var message = errors.Values.SelectMany(x => x).FirstOrDefault() ?? "Request validation failed.";
+        return new Microsoft.AspNetCore.Mvc.BadRequestObjectResult(new { success = false, message, errors });
+    };
+});
+builder.Services.AddHttpClient(nameof(GoogleDriveAvatarService), client => client.Timeout = TimeSpan.FromSeconds(30));
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IGoogleDriveAvatarService, GoogleDriveAvatarService>();
 builder.Services.AddScoped<IFamilyTreeService, FamilyTreeService>();
 
+var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+    ?? (builder.Environment.IsDevelopment() ? ["http://localhost:7000"] : []);
+if (allowedOrigins.Any(origin => !Uri.TryCreate(origin, UriKind.Absolute, out var uri) ||
+    uri.Scheme is not ("http" or "https") || uri.AbsolutePath != "/" || !string.IsNullOrEmpty(uri.Query) ||
+    !string.IsNullOrEmpty(uri.Fragment) || origin.Contains('*')))
+    throw new InvalidOperationException("Cors:AllowedOrigins must contain exact HTTP(S) origins.");
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowReactApp", policy =>
     {
-        policy.WithOrigins("http://localhost:7000")
+        policy.WithOrigins(allowedOrigins)
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials();
@@ -72,7 +90,14 @@ builder.Services.AddSwaggerGen(options =>
 
 // Giữ nguyên phần JWT Authentication phía dưới...
 var jwtSettings = builder.Configuration.GetSection("JwtSettings");
-var secretKey = Encoding.UTF8.GetBytes(jwtSettings["SecretKey"]!);
+var jwtSecret = jwtSettings["SecretKey"];
+if (string.IsNullOrWhiteSpace(jwtSecret) || jwtSecret.Length < 32)
+    throw new InvalidOperationException("JwtSettings:SecretKey must be supplied through environment variables or user secrets and be at least 32 characters.");
+if (jwtSettings.GetValue<int>("AccessTokenSeconds") <= 0 || jwtSettings.GetValue<int>("RefreshTokenMinutes") <= 0)
+    throw new InvalidOperationException("JwtSettings token lifetimes must be positive.");
+if (string.IsNullOrWhiteSpace(jwtSettings["Issuer"]) || string.IsNullOrWhiteSpace(jwtSettings["Audience"]))
+    throw new InvalidOperationException("JwtSettings:Issuer and Audience are required.");
+var secretKey = Encoding.UTF8.GetBytes(jwtSecret);
 
 builder.Services.AddAuthentication(options =>
 {
@@ -81,7 +106,7 @@ builder.Services.AddAuthentication(options =>
 })
 .AddJwtBearer(options =>
 {
-    options.RequireHttpsMetadata = false;
+    options.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
     options.SaveToken = true;
     options.TokenValidationParameters = new TokenValidationParameters
     {
@@ -92,6 +117,7 @@ builder.Services.AddAuthentication(options =>
         ValidIssuer = jwtSettings["Issuer"],
         ValidAudience = jwtSettings["Audience"],
         IssuerSigningKey = new SymmetricSecurityKey(secretKey),
+        ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
         ClockSkew = TimeSpan.Zero
     };
 
@@ -99,32 +125,64 @@ builder.Services.AddAuthentication(options =>
     {
         OnMessageReceived = context =>
         {
-            if (context.Request.Cookies.ContainsKey("AccessToken"))
+            if (!context.Request.Headers.ContainsKey("Authorization") && context.Request.Cookies.ContainsKey("AccessToken"))
             {
                 context.Token = context.Request.Cookies["AccessToken"];
             }
             return Task.CompletedTask;
+        },
+        OnTokenValidated = async context =>
+        {
+            var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+            var email = context.Principal?.FindFirstValue(ClaimTypes.Email);
+            var user = await db.Users.AsNoTracking().Include(x => x.UserRoles).ThenInclude(x => x.Role)
+                .SingleOrDefaultAsync(x => x.Email == email);
+            if (user is null || !user.IsActive)
+            {
+                context.Fail("This account is unavailable.");
+                return;
+            }
+            // Enforce current DB roles, including demotions, even before an old access token expires.
+            if (context.Principal?.Identity is ClaimsIdentity identity)
+            {
+                foreach (var claim in identity.FindAll(identity.RoleClaimType).ToList()) identity.RemoveClaim(claim);
+                foreach (var role in user.UserRoles.Select(x => x.Role.Name).Where(x => x is AppRoles.Admin or AppRoles.User).Distinct())
+                    identity.AddClaim(new Claim(identity.RoleClaimType, role));
+            }
+        },
+        OnChallenge = async context =>
+        {
+            context.HandleResponse();
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { success = false, message = "A valid session is required." });
+        },
+        OnForbidden = context =>
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return context.Response.WriteAsJsonAsync(new { success = false, message = "You do not have permission to perform this action." });
         }
     };
 });
 
 var app = builder.Build();
 
-// Tự động kiểm tra và khởi tạo Database PostgreSQL & Seed dữ liệu mẫu
+app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
+{
+    var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("UnhandledException");
+    var exception = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
+    logger.LogError(exception, "Unhandled exception for {Method} {Path}", context.Request.Method, context.Request.Path);
+    var databaseConflict = exception is Npgsql.PostgresException { SqlState: "40001" or "40P01" or "23505" }
+        || exception is DbUpdateException { InnerException: Npgsql.PostgresException { SqlState: "40001" or "40P01" or "23505" } };
+    context.Response.StatusCode = databaseConflict ? StatusCodes.Status409Conflict : StatusCodes.Status500InternalServerError;
+    await context.Response.WriteAsJsonAsync(new { success = false, message = databaseConflict ? "The request conflicted with another change. Please retry." : "An unexpected server error occurred." });
+}));
+
+// A failed schema update must stop startup rather than serving a partially initialized database.
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    try
-    {
-        await db.Database.EnsureCreatedAsync();
-
-        await db.SeedDataAsync();
-        Console.WriteLine("[DATABASE] ✅ Kết nối PostgreSQL, kiểm tra Schema và Seed dữ liệu khởi tạo thành công!");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"[DATABASE] ⚠️ Lưu ý kết nối PostgreSQL: {ex.Message}");
-    }
+    await DatabaseStartup.MigrateAndSeedAsync(db, app.Configuration);
+    app.Logger.LogInformation("Database migrations and seed completed.");
 }
 
 if (app.Environment.IsDevelopment())
@@ -142,9 +200,31 @@ app.UseRouting();
 
 app.UseCors("AllowReactApp");
 
+// Browser cookie requests use a custom header to prevent form-based CSRF.
+// Cross-origin browser calls must also originate from an explicitly trusted origin.
+app.Use(async (context, nextMiddleware) =>
+{
+    var unsafeMethod = context.Request.Method is not ("GET" or "HEAD" or "OPTIONS");
+    if (unsafeMethod)
+    {
+        var origin = context.Request.Headers.Origin.ToString();
+        var hasCookieSession = context.Request.Cookies.ContainsKey("AccessToken") || context.Request.Cookies.ContainsKey("RefreshToken");
+        if ((!string.IsNullOrEmpty(origin) && !allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase)) ||
+            (hasCookieSession && context.Request.Headers["X-Requested-With"] != "MyLife"))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { success = false, message = "The request origin could not be verified." });
+            return;
+        }
+    }
+    await nextMiddleware(context);
+});
+
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
 
 app.Run();
+
+public partial class Program { }

@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using MyLife.Shared.Entities;
 using Microsoft.EntityFrameworkCore;
+using MyLife.Shared.Security;
 
 namespace MyLife.Shared.Data
 {
@@ -39,6 +40,10 @@ namespace MyLife.Shared.Data
                 entity.Property(e => e.DateOfBirth).HasColumnName("date_of_birth");
                 entity.Property(e => e.AvatarUrl).HasColumnName("avatar_url").HasColumnType("text");
                 entity.Property(e => e.AuthProvider).HasColumnName("auth_provider").HasDefaultValue(0);
+                entity.Property(e => e.HasLocalProvider).HasColumnName("has_local_provider").HasDefaultValue(false);
+                entity.Property(e => e.HasGoogleProvider).HasColumnName("has_google_provider").HasDefaultValue(false);
+                entity.Property(e => e.GoogleSubject).HasColumnName("google_subject").HasMaxLength(255);
+                entity.HasIndex(e => e.GoogleSubject).IsUnique();
                 entity.Property(e => e.IsActive).HasColumnName("is_active").HasDefaultValue(true);
                 entity.Property(e => e.VerifiedAt).HasColumnName("verified_at");
                 entity.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
@@ -184,52 +189,60 @@ namespace MyLife.Shared.Data
         /// <summary>
         /// Tự động chèn dữ liệu mẫu (Roles, Generations & Duy nhất 1 tài khoản Admin) khi database rỗng
         /// </summary>
-        public async Task SeedDataAsync()
+        public async Task SeedDataAsync(IConfiguration configuration)
         {
-            // Seed Roles
-            if (!await Roles.AnyAsync())
+            await using var transaction = await Database.BeginTransactionAsync();
+            // Keep the seed idempotent even when multiple API instances start together.
+            await Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(741003001);");
+
+            foreach (var roleName in new[] { AppRoles.Admin, AppRoles.User })
             {
-                var adminRole = new Role { Id = 1, Name = "ADMIN", Description = "Quản trị viên hệ thống" };
-                var userRole = new Role { Id = 2, Name = "USER", Description = "Người dùng tiêu chuẩn" };
-                await Roles.AddRangeAsync(adminRole, userRole);
-                await SaveChangesAsync();
+                if (!await Roles.AnyAsync(role => role.Name == roleName))
+                    Roles.Add(new Role { Name = roleName });
+            }
+            await SaveChangesAsync();
+
+            for (var generation = 1; generation <= 5; generation++)
+            {
+                if (!await Generations.AnyAsync(item => item.Id == generation))
+                    Generations.Add(new Generation { Id = generation, Name = $"Đời {generation}", Title = $"Thế hệ thứ {generation}" });
             }
 
-            // Seed Generations (Đời 1 -> Đời 5)
-            if (!await Generations.AnyAsync())
+            var seedEmail = configuration["SeedAdmin:Email"]?.Trim().ToLowerInvariant();
+            var seedPassword = configuration["SeedAdmin:Password"];
+            if (!string.IsNullOrWhiteSpace(seedEmail) || !string.IsNullOrWhiteSpace(seedPassword))
             {
-                var defaultGenerations = new[]
+                if (!new System.ComponentModel.DataAnnotations.EmailAddressAttribute().IsValid(seedEmail))
+                    throw new InvalidOperationException("SeedAdmin email must be a valid email address.");
+
+                var validSeedPassword = !string.IsNullOrEmpty(seedPassword) &&
+                    seedPassword.Length >= 8 &&
+                    System.Text.Encoding.UTF8.GetByteCount(seedPassword) <= 72 &&
+                    seedPassword.Any(char.IsUpper) &&
+                    seedPassword.Any(char.IsDigit) &&
+                    seedPassword.Any(character => !char.IsLetterOrDigit(character) && !char.IsWhiteSpace(character)) &&
+                    !seedPassword.Any(char.IsWhiteSpace);
+                if (!validSeedPassword)
+                    throw new InvalidOperationException("SeedAdmin password must be at least 8 characters, no more than 72 UTF-8 bytes, and contain at least one uppercase letter, one digit, one special character, and no whitespace.");
+
+                var administrator = await Users.Include(user => user.UserRoles).SingleOrDefaultAsync(user => user.Email == seedEmail);
+                if (administrator is null)
                 {
-                    new Generation { Id = 1, Name = "Đời 1", Title = "Thế hệ thứ nhất", Description = "Thế hệ khởi thủy / Tiền bối" },
-                    new Generation { Id = 2, Name = "Đời 2", Title = "Thế hệ thứ hai", Description = "Thế hệ con thứ nhất" },
-                    new Generation { Id = 3, Name = "Đời 3", Title = "Thế hệ thứ ba", Description = "Thế hệ con cháu kế cận" },
-                    new Generation { Id = 4, Name = "Đời 4", Title = "Thế hệ thứ tư", Description = "Thế hệ chắt" },
-                    new Generation { Id = 5, Name = "Đời 5", Title = "Thế hệ thứ năm", Description = "Thế hệ chút" },
-                };
-                await Generations.AddRangeAsync(defaultGenerations);
-                await SaveChangesAsync();
+                    var adminRole = await Roles.SingleAsync(role => role.Name == AppRoles.Admin);
+                    Users.Add(new User
+                    {
+                        Email = seedEmail!,
+                        PasswordHash = BCrypt.Net.BCrypt.HashPassword(seedPassword, workFactor: 11),
+                        HasLocalProvider = true,
+                        IsActive = true,
+                        VerifiedAt = DateTime.UtcNow,
+                        UserRoles = [new UserRole { Role = adminRole }]
+                    });
+                }
+                // An existing user is never silently promoted or has their password overwritten by seed.
             }
-
-            // Seed Users: Chỉ 1 tài khoản Admin duy nhất
-            if (!await Users.AnyAsync())
-            {
-                var adminUser = new User
-                {
-                    Id = 1,
-                    Email = "admin@gmail.com",
-                    PasswordHash = BCrypt.Net.BCrypt.HashPassword("Admin@123"),
-                    IsActive = true,
-                    VerifiedAt = DateTime.UtcNow,
-                };
-
-                await Users.AddAsync(adminUser);
-                await SaveChangesAsync();
-
-                // Assign Role ADMIN
-                var adminUserRole = new UserRole { UserId = adminUser.Id, RoleId = 1 };
-                await UserRoles.AddAsync(adminUserRole);
-                await SaveChangesAsync();
-            }
+            await SaveChangesAsync();
+            await transaction.CommitAsync();
         }
     }
 }

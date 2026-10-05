@@ -11,6 +11,7 @@ namespace MyLife.Features.FamilyTree.DTOs
         public string FullName { get; set; } = null!;
 
         [Required(ErrorMessage = "Thế hệ là bắt buộc")]
+        [Range(1, int.MaxValue)]
         public int Generation { get; set; }
 
         [MaxLength(20)]

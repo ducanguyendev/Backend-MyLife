@@ -14,6 +14,10 @@ namespace MyLife.Shared.Entities
         public DateOnly? DateOfBirth { get; set; }
         public string? AvatarUrl { get; set; }
         public int AuthProvider { get; set; } = 0; // 0 = LOCAL, 1 = GOOGLE
+        // AuthProvider is retained for legacy clients as account origin; these flags describe usable login methods.
+        public bool HasLocalProvider { get; set; }
+        public bool HasGoogleProvider { get; set; }
+        public string? GoogleSubject { get; set; }
         public bool IsActive { get; set; } = true;
         public DateTime? VerifiedAt { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
