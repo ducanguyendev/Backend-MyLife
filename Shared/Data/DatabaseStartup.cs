@@ -43,7 +43,8 @@ public static class DatabaseStartup
                 foreach (var property in entity.GetProperties())
                 {
                     var column = property.GetColumnName(store)!;
-                    if (table == "users" && column is "google_subject" or "has_local_provider" or "has_google_provider")
+                    if (table == "users" && column is "google_subject" or "has_local_provider" or "has_google_provider" or
+                        "avatar_drive_file_id" or "avatar_source" or "google_avatar_source_url")
                     {
                         if (columns.ContainsKey((table, column))) throw new InvalidOperationException("Legacy schema already contains upgrade columns but has no migration history; review it manually.");
                         continue;

@@ -6,10 +6,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>MyLife</RootNamespace>
     <UserSecretsId>b2e45a77-6c25-4f87-8caf-9f6e3b3215f7</UserSecretsId>
+
+    <DefaultItemExcludes>
+      $(DefaultItemExcludes);Tests/**
+    </DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="Tests/**/*.cs" />
+    <Compile Remove="Tests/**" />
+    <Content Remove="Tests/**" />
+    <None Remove="Tests/**" />
+    <EmbeddedResource Remove="Tests/**" />
   </ItemGroup>
 
   <ItemGroup>

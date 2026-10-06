@@ -7,10 +7,14 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using MyLife.Shared.Data;
+using MyLife.Features.Auth.Services;
+using MyLife.Features.Avatar.Services;
 using Npgsql;
 using Xunit;
 
@@ -53,6 +57,16 @@ public sealed class MyLifeFactory : WebApplicationFactory<Program>
             ["SeedAdmin:Password"] = "Admin_Test!234567",
             ["Cors:AllowedOrigins:0"] = "http://localhost:7000"
         }));
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IGoogleDriveAvatarService>();
+            services.RemoveAll<IGoogleCredentialVerifier>();
+            services.AddSingleton<TestAvatarStorage>();
+            services.AddSingleton<IGoogleDriveAvatarService>(provider => provider.GetRequiredService<TestAvatarStorage>());
+            services.AddSingleton<IGoogleCredentialVerifier, TestGoogleCredentialVerifier>();
+            services.AddHttpClient(nameof(GoogleAvatarSyncService))
+                .ConfigurePrimaryHttpMessageHandler(() => new TestGoogleImageHandler());
+        });
     }
 }
 

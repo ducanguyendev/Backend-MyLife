@@ -21,11 +21,15 @@ Browser mutations send `credentials: include` and `X-Requested-With: MyLife`; Ja
 
 ## Avatar
 
-| Method | Route |
-| --- | --- |
-| GET | `/api/avatar/{email}` |
-| POST | `/api/avatar/upload` |
-| DELETE | `/api/avatar` |
+| Method | Route | Notes |
+| --- | --- | --- |
+| GET | `/api/avatar/{email}` | Redirects to the current Drive-backed avatar. |
+| POST | `/api/avatar/upload` | Authenticated multipart upload (`file`, max 5 MB); replaces the user's existing Drive file and returns a cache-busted `avatarUrl`. |
+| DELETE | `/api/avatar` | Deletes the Drive file first, then clears avatar metadata. |
+
+`users.avatar_drive_file_id` is the stable storage identity. `avatar_source` is `MANUAL`, `GOOGLE`, or null. A manual avatar is never overwritten by Google login. Google profile images are copied to Drive only when missing or changed; storage failure does not invalidate an otherwise successful Google authentication.
+
+The deployable Apps Script implementation and its backend payload contract are in `GOOGLE_APPS_SCRIPT_AVATAR.gs`.
 
 ## Family tree
 

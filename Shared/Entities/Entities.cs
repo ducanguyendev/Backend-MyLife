@@ -13,6 +13,9 @@ namespace MyLife.Shared.Entities
         public string? Gender { get; set; }
         public DateOnly? DateOfBirth { get; set; }
         public string? AvatarUrl { get; set; }
+        public string? AvatarDriveFileId { get; set; }
+        public string? AvatarSource { get; set; }
+        public string? GoogleAvatarSourceUrl { get; set; }
         public int AuthProvider { get; set; } = 0; // 0 = LOCAL, 1 = GOOGLE
         // AuthProvider is retained for legacy clients as account origin; these flags describe usable login methods.
         public bool HasLocalProvider { get; set; }

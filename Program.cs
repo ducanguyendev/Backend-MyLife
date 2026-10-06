@@ -36,8 +36,12 @@ builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
     };
 });
 builder.Services.AddHttpClient(nameof(GoogleDriveAvatarService), client => client.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddHttpClient(nameof(GoogleAvatarSyncService), client => client.Timeout = TimeSpan.FromSeconds(15))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddScoped<ITokenService, TokenService>();
+builder.Services.AddScoped<IGoogleCredentialVerifier, GoogleCredentialVerifier>();
 builder.Services.AddScoped<IGoogleDriveAvatarService, GoogleDriveAvatarService>();
+builder.Services.AddScoped<IGoogleAvatarSyncService, GoogleAvatarSyncService>();
 builder.Services.AddScoped<IFamilyTreeService, FamilyTreeService>();
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()

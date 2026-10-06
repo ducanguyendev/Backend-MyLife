@@ -39,6 +39,9 @@ namespace MyLife.Shared.Data
                 entity.Property(e => e.Gender).HasColumnName("gender").HasMaxLength(20);
                 entity.Property(e => e.DateOfBirth).HasColumnName("date_of_birth");
                 entity.Property(e => e.AvatarUrl).HasColumnName("avatar_url").HasColumnType("text");
+                entity.Property(e => e.AvatarDriveFileId).HasColumnName("avatar_drive_file_id").HasMaxLength(255);
+                entity.Property(e => e.AvatarSource).HasColumnName("avatar_source").HasMaxLength(20);
+                entity.Property(e => e.GoogleAvatarSourceUrl).HasColumnName("google_avatar_source_url").HasColumnType("text");
                 entity.Property(e => e.AuthProvider).HasColumnName("auth_provider").HasDefaultValue(0);
                 entity.Property(e => e.HasLocalProvider).HasColumnName("has_local_provider").HasDefaultValue(false);
                 entity.Property(e => e.HasGoogleProvider).HasColumnName("has_google_provider").HasDefaultValue(false);

@@ -1,154 +1,119 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using System.Security.Claims;
-using MyLife.Shared.Data;
 using MyLife.Features.Avatar.Services;
+using MyLife.Shared.Data;
 
-namespace MyLife.Features.Avatar.Controllers
+namespace MyLife.Features.Avatar.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public sealed class AvatarController(
+    IGoogleDriveAvatarService avatarService, AppDbContext db, ILogger<AvatarController> logger) : ControllerBase
 {
-    [ApiController]
-    [Route("api/[controller]")]
-    public class AvatarController : ControllerBase
+    [HttpGet("{email}")]
+    public async Task<IActionResult> GetAvatar(string email)
     {
-        private readonly IGoogleDriveAvatarService _avatarService;
-        private readonly AppDbContext _db;
+        if (string.IsNullOrWhiteSpace(email)) return BadRequest("Email is invalid.");
 
-        public AvatarController(IGoogleDriveAvatarService avatarService, AppDbContext db)
-        {
-            _avatarService = avatarService;
-            _db = db;
-        }
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        var user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Email == normalizedEmail);
+        if (user is null || string.IsNullOrWhiteSpace(user.AvatarUrl))
+            return NotFound(new { message = "No avatar has been set." });
 
-        /// <summary>
-        /// Lấy ảnh đại diện của người dùng từ Google Drive theo email (Redirect tới Google Drive URL lưu trong DB)
-        /// </summary>
-        [HttpGet("{email}")]
-        public async Task<IActionResult> GetAvatar(string email)
-        {
-            if (string.IsNullOrWhiteSpace(email))
-                return BadRequest("Email không hợp lệ.");
+        if (!Uri.TryCreate(user.AvatarUrl, UriKind.Absolute, out var avatarUri) ||
+            avatarUri.Scheme is not ("http" or "https"))
+            return NotFound(new { message = "Avatar is unavailable." });
 
-            var normalizedEmail = email.Trim().ToLowerInvariant();
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
-            if (user == null || string.IsNullOrWhiteSpace(user.AvatarUrl))
-                return NotFound(new { message = "Chưa có ảnh đại diện." });
+        var redirectUrl = avatarUri.ToString();
+        if (!string.IsNullOrWhiteSpace(user.AvatarDriveFileId) && Request.Query.TryGetValue("t", out var timestamp))
+            redirectUrl = Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString(
+                GoogleAvatarSyncService.ToDirectDriveUrl(user.AvatarDriveFileId), "t", timestamp.ToString());
+        Response.Headers.CacheControl = "no-store";
+        return Redirect(redirectUrl);
+    }
 
-            if (user.AvatarUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-            {
-                var url = user.AvatarUrl;
-                if (url.Contains("drive.google.com/file/d/"))
-                {
-                    var match = System.Text.RegularExpressions.Regex.Match(url, @"/file/d/([a-zA-Z0-9_-]+)");
-                    if (match.Success)
-                    {
-                        var tParam = url.Contains("?t=") ? url.Substring(url.IndexOf("?t=")) : "";
-                        url = $"https://lh3.googleusercontent.com/d/{match.Groups[1].Value}{tParam}";
-                    }
-                }
-                return Redirect(url);
-            }
+    [Authorize]
+    [HttpPost("upload")]
+    public async Task<IActionResult> UploadAvatar(IFormFile file)
+    {
+        var email = User.FindFirstValue(ClaimTypes.Email) ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrWhiteSpace(email))
+            return Unauthorized(new { message = "The session is invalid." });
+        if (file is null || file.Length == 0)
+            return BadRequest(new { message = "Please select a valid image." });
+        if (file.Length > GoogleAvatarSyncService.MaximumAvatarBytes)
+            return BadRequest(new { message = "The image must not exceed 5 MB." });
 
-            return NotFound(new { message = "Không tìm thấy ảnh đại diện." });
-        }
+        var allowedMimeTypes = new[] { "image/jpeg", "image/png", "image/webp", "image/gif", "image/jpg" };
+        var allowedExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp", ".gif" };
+        var extension = Path.GetExtension(file.FileName)?.ToLowerInvariant();
+        if (!allowedMimeTypes.Contains(file.ContentType, StringComparer.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(extension) || !allowedExtensions.Contains(extension))
+            return BadRequest(new { message = "Only JPG, PNG, WEBP, and GIF images are supported." });
 
-        /// <summary>
-        /// Tải lên ảnh đại diện mới và lưu đường dẫn vào cơ sở dữ liệu
-        /// </summary>
-        [Authorize]
-        [HttpPost("upload")]
-        public async Task<IActionResult> UploadAvatar(IFormFile file)
-        {
-            var email = User.FindFirstValue(ClaimTypes.Email) 
-                     ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
+        if (user is null || !user.IsActive)
+            return Unauthorized(new { success = false, message = "The session is invalid." });
 
-            if (string.IsNullOrEmpty(email))
-                return Unauthorized(new { message = "Phiên làm việc không hợp lệ." });
+        var existingFileId = user.AvatarDriveFileId;
+        logger.LogInformation(
+            "Avatar upload requested UserId={UserId} ExistingFileId={ExistingFileId} ContentType={ContentType} FileSize={FileSize}",
+            user.Id, existingFileId, file.ContentType, file.Length);
+        var stored = await avatarService.UploadAvatarAsync(
+            normalizedEmail,
+            file,
+            existingFileId,
+            HttpContext.RequestAborted);
+        logger.LogInformation(
+            "Avatar upload result UserId={UserId} ExistingFileId={ExistingFileId} ResultFileId={ResultFileId} Success={Success} ContentType={ContentType} FileSize={FileSize}",
+            user.Id, existingFileId, stored.FileId, stored.Success, file.ContentType, file.Length);
+        if (!stored.Success || string.IsNullOrWhiteSpace(stored.FileId) ||
+            (!string.IsNullOrWhiteSpace(existingFileId) && stored.FileId != existingFileId))
+            return StatusCode(StatusCodes.Status502BadGateway, new { message = "Unable to store the avatar. Please try again." });
 
-            if (file == null || file.Length == 0)
-                return BadRequest(new { message = "Vui lòng chọn một file ảnh hợp lệ." });
+        var stableAvatarUrl = GoogleAvatarSyncService.ToDirectDriveUrl(stored.FileId);
+        user.AvatarUrl = stableAvatarUrl;
+        user.AvatarDriveFileId = stored.FileId;
+        user.AvatarSource = AvatarSources.Manual;
+        user.GoogleAvatarSourceUrl = null;
+        user.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
+        logger.LogInformation("Avatar upload persisted UserId={UserId} AvatarDriveFileId={FileId}", user.Id, user.AvatarDriveFileId);
 
-            // Giới hạn 5MB
-            if (file.Length > 5 * 1024 * 1024)
-                return BadRequest(new { message = "Kích thước file ảnh không được vượt quá 5MB." });
+        var cacheBustedUrl = $"{stableAvatarUrl}?t={DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        return Ok(new { message = "Avatar updated successfully.", avatarUrl = cacheBustedUrl });
+    }
 
-            var allowedMimeTypes = new[] { "image/jpeg", "image/png", "image/webp", "image/gif", "image/jpg" };
-            var allowedExts = new[] { ".jpg", ".jpeg", ".png", ".webp", ".gif" };
-            var ext = Path.GetExtension(file.FileName)?.ToLowerInvariant();
-            var isMimeOk = allowedMimeTypes.Contains(file.ContentType.ToLowerInvariant());
-            var isExtOk = !string.IsNullOrEmpty(ext) && allowedExts.Contains(ext);
+    [Authorize]
+    [HttpDelete]
+    public async Task<IActionResult> DeleteAvatar()
+    {
+        var email = User.FindFirstValue(ClaimTypes.Email) ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrWhiteSpace(email))
+            return Unauthorized(new { message = "The session is invalid." });
 
-            if (!isMimeOk || !isExtOk)
-                return BadRequest(new { message = "Chỉ chấp nhận các định dạng ảnh JPG, PNG, WEBP, GIF." });
+        var normalizedEmail = email.Trim().ToLowerInvariant();
+        var user = await db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
+        if (user is null || !user.IsActive)
+            return Unauthorized(new { success = false, message = "The session is invalid." });
 
-            var normalizedEmail = email.Trim().ToLowerInvariant();
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
-            if (user is null || !user.IsActive)
-                return Unauthorized(new { success = false, message = "Phiên làm việc không hợp lệ." });
+        var hasStoredAvatar = !string.IsNullOrWhiteSpace(user.AvatarDriveFileId) || !string.IsNullOrWhiteSpace(user.AvatarUrl);
+        if (hasStoredAvatar && !await avatarService.DeleteAvatarAsync(
+                normalizedEmail,
+                user.AvatarDriveFileId,
+                HttpContext.RequestAborted))
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { success = false, message = "Avatar storage is temporarily unavailable." });
 
-            var (success, driveUrl, fileId) = await _avatarService.UploadAvatarAsync(email, file);
-            if (!success)
-                return StatusCode(500, new { message = "Không thể tải ảnh lên. Vui lòng thử lại." });
+        user.AvatarUrl = null;
+        user.AvatarDriveFileId = null;
+        user.AvatarSource = null;
+        user.GoogleAvatarSourceUrl = null;
+        user.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync();
 
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            // Lưu URL Google Drive chuẩn CDN (lh3.googleusercontent.com/d/{fileId}) để client tải trực tiếp ảnh, không nhận nhầm trang HTML preview
-            string directUrl;
-            if (!string.IsNullOrEmpty(fileId))
-            {
-                directUrl = $"https://lh3.googleusercontent.com/d/{fileId}";
-            }
-            else if (!string.IsNullOrEmpty(driveUrl) && driveUrl.Contains("/file/d/"))
-            {
-                var match = System.Text.RegularExpressions.Regex.Match(driveUrl, @"/file/d/([a-zA-Z0-9_-]+)");
-                directUrl = match.Success ? $"https://lh3.googleusercontent.com/d/{match.Groups[1].Value}" : driveUrl;
-            }
-            else
-            {
-                directUrl = driveUrl ?? "";
-            }
-
-            var baseDriveUrl = !string.IsNullOrEmpty(directUrl) ? directUrl.Split('?')[0] : "";
-            var finalAvatarUrl = !string.IsNullOrEmpty(baseDriveUrl) 
-                ? $"{baseDriveUrl}?t={timestamp}" 
-                : $"/api/avatar/{Uri.EscapeDataString(email)}?t={timestamp}";
-
-            // Cập nhật đường dẫn file ảnh avatar vào cơ sở dữ liệu PostgreSQL
-            user.AvatarUrl = finalAvatarUrl;
-            user.UpdatedAt = DateTime.UtcNow;
-            await _db.SaveChangesAsync();
-
-            return Ok(new
-            {
-                message = "Cập nhật ảnh đại diện thành công!",
-                avatarUrl = finalAvatarUrl
-            });
-        }
-
-        /// <summary>
-        /// Xóa ảnh đại diện và cập nhật DB về null
-        /// </summary>
-        [Authorize]
-        [HttpDelete]
-        public async Task<IActionResult> DeleteAvatar()
-        {
-            var email = User.FindFirstValue(ClaimTypes.Email) 
-                     ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
-
-            if (string.IsNullOrEmpty(email))
-                return Unauthorized(new { message = "Phiên làm việc không hợp lệ." });
-
-            var normalizedEmail = email.Trim().ToLowerInvariant();
-            var user = await _db.Users.FirstOrDefaultAsync(u => u.Email == normalizedEmail);
-            if (user is null || !user.IsActive)
-                return Unauthorized(new { success = false, message = "Phiên làm việc không hợp lệ." });
-            if (!await _avatarService.DeleteAvatarAsync(email))
-                return StatusCode(StatusCodes.Status503ServiceUnavailable, new { success = false, message = "Avatar storage is temporarily unavailable." });
-
-            user.AvatarUrl = null;
-            user.UpdatedAt = DateTime.UtcNow;
-            await _db.SaveChangesAsync();
-
-            return Ok(new { message = "Đã xóa ảnh đại diện thành công!" });
-        }
+        return Ok(new { message = "Avatar deleted successfully." });
     }
 }

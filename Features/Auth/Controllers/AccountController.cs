@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 using System.Security.Claims;
 using System.ComponentModel.DataAnnotations;
 using System.Security.Cryptography;
@@ -10,6 +9,7 @@ using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.EntityFrameworkCore;
 using MyLife.Features.Auth.Models;
 using MyLife.Features.Auth.Services;
+using MyLife.Features.Avatar.Services;
 using MyLife.Features.User.Models;
 using MyLife.Shared.Data;
 using MyLife.Shared.Entities;
@@ -24,12 +24,13 @@ public sealed class AccountController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly ITokenService _tokens;
-    private readonly IHttpClientFactory _httpClients;
+    private readonly IGoogleCredentialVerifier _googleCredentials;
+    private readonly IGoogleAvatarSyncService _googleAvatars;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AccountController> _logger;
 
-    public AccountController(AppDbContext db, ITokenService tokens, IHttpClientFactory httpClients, IConfiguration configuration, ILogger<AccountController> logger)
-        => (_db, _tokens, _httpClients, _configuration, _logger) = (db, tokens, httpClients, configuration, logger);
+    public AccountController(AppDbContext db, ITokenService tokens, IGoogleCredentialVerifier googleCredentials, IGoogleAvatarSyncService googleAvatars, IConfiguration configuration, ILogger<AccountController> logger)
+        => (_db, _tokens, _googleCredentials, _googleAvatars, _configuration, _logger) = (db, tokens, googleCredentials, googleAvatars, configuration, logger);
 
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginViewModel model)
@@ -76,7 +77,7 @@ public sealed class AccountController : ControllerBase
     {
         try
         {
-            var identity = await VerifyGoogleCredentialAsync(request);
+            var identity = await _googleCredentials.VerifyAsync(request, HttpContext.RequestAborted);
             if (identity is null) return BadRequest(Error("The Google credential is invalid or expired."));
             var email = NormalizeEmail(identity.Email);
             var user = await UserWithRoles().SingleOrDefaultAsync(x => x.GoogleSubject == identity.Subject)
@@ -86,7 +87,7 @@ public sealed class AccountController : ControllerBase
                 var role = await _db.Roles.SingleOrDefaultAsync(r => r.Name == AppRoles.User);
                 if (role is null) return StatusCode(503, Error("The service has not been initialized."));
                 user = new AppUser { Email = email, PasswordHash = BCrypt.Net.BCrypt.HashPassword(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), workFactor: 11),
-                    FullName = identity.Name, AvatarUrl = identity.Picture, AuthProvider = 1, HasGoogleProvider = true, GoogleSubject = identity.Subject, IsActive = true, VerifiedAt = DateTime.UtcNow,
+                    FullName = identity.Name, AuthProvider = 1, HasGoogleProvider = true, GoogleSubject = identity.Subject, IsActive = true, VerifiedAt = DateTime.UtcNow,
                     CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow, UserRoles = [new UserRole { Role = role }] };
                 _db.Users.Add(user); await _db.SaveChangesAsync();
             }
@@ -98,10 +99,10 @@ public sealed class AccountController : ControllerBase
                 if (!user.IsActive) return Unauthorized(Error("This account is locked."));
                 if (!string.IsNullOrWhiteSpace(user.GoogleSubject) && user.GoogleSubject != identity.Subject) return BadRequest(Error("This Google account is linked to a different identity."));
                 user.HasGoogleProvider = true; user.GoogleSubject ??= identity.Subject;
-                if (!string.IsNullOrWhiteSpace(identity.Picture)) user.AvatarUrl = identity.Picture;
                 user.UpdatedAt = DateTime.UtcNow;
             }
             if (!user.IsActive) { await LogLoginAsync(user, email, "FAILED"); await _db.SaveChangesAsync(); return Unauthorized(Error("This account is locked.")); }
+            await _googleAvatars.SyncIfNeededAsync(user, identity.Picture, HttpContext.RequestAborted);
             await LogLoginAsync(user, email, "SUCCESS"); await _db.SaveChangesAsync();
             return Ok(await CreateSessionResponseAsync(user));
         }
@@ -250,28 +251,6 @@ public sealed class AccountController : ControllerBase
         _db.Users.Remove(user); await _db.SaveChangesAsync(); return Ok(new { success = true, deletedId = id });
     }
 
-    private async Task<GoogleIdentity?> VerifyGoogleCredentialAsync(GoogleAuthRequest request)
-    {
-        if (string.IsNullOrWhiteSpace(request.Code) == string.IsNullOrWhiteSpace(request.IdToken)) return null;
-        var clientId = _configuration["Authentication:Google:ClientId"]; if (string.IsNullOrWhiteSpace(clientId)) throw new HttpRequestException("Google client ID missing");
-        var idToken = request.IdToken;
-        if (string.IsNullOrWhiteSpace(idToken) && !string.IsNullOrWhiteSpace(request.Code))
-        {
-            var secret = _configuration["Authentication:Google:ClientSecret"]; if (string.IsNullOrWhiteSpace(secret)) return null;
-            var values = new Dictionary<string, string> { ["code"] = request.Code, ["client_id"] = clientId, ["client_secret"] = secret, ["redirect_uri"] = request.RedirectUri ?? "postmessage", ["grant_type"] = "authorization_code" };
-            var response = await _httpClients.CreateClient().PostAsync("https://oauth2.googleapis.com/token", new FormUrlEncodedContent(values)); if (!response.IsSuccessStatusCode) return null;
-            idToken = (await response.Content.ReadFromJsonAsync<GoogleTokenResponse>())?.IdToken;
-        }
-        if (string.IsNullOrWhiteSpace(idToken)) return null;
-        var allowedAudiences = _configuration.GetSection("Authentication:Google:AllowedClientIds").Get<string[]>() ?? [];
-        allowedAudiences = allowedAudiences.Append(clientId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).ToArray();
-        var payload = await GoogleJsonWebSignature.ValidateAsync(idToken, new GoogleJsonWebSignature.ValidationSettings { Audience = allowedAudiences });
-        if (!new EmailAddressAttribute().IsValid(payload.Email) || string.IsNullOrWhiteSpace(payload.Subject) || payload.EmailVerified != true ||
-            payload.ExpirationTimeSeconds <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
-        var authoritativeEmail = payload.Email.EndsWith("@gmail.com", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(payload.HostedDomain);
-        return new GoogleIdentity(payload.Email, payload.Subject, payload.Name, payload.Picture, authoritativeEmail);
-    }
-
     private async Task<object> CreateSessionResponseAsync(AppUser user) { var refresh = _tokens.GenerateRefreshToken(); _db.RefreshTokens.Add(NewRefreshToken(user.Id, refresh)); await _db.SaveChangesAsync(); return CreateSessionResponse(user, refresh); }
     private object CreateSessionResponse(AppUser user, string refresh)
     {
@@ -312,7 +291,6 @@ public sealed class AccountController : ControllerBase
         Response.Cookies.Delete("AccessToken", CookieOptions());
         Response.Cookies.Delete("RefreshToken", CookieOptions());
     }
-    private sealed record GoogleIdentity(string Email, string Subject, string? Name, string? Picture, bool IsAuthoritativeEmail);
 }
 
 public sealed class UpdateUserStatusRequest { [Required] public bool? IsActive { get; set; } }
