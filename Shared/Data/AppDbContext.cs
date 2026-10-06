@@ -20,10 +20,54 @@ namespace MyLife.Shared.Data
         public DbSet<FamilyMember> FamilyMembers => Set<FamilyMember>();
         public DbSet<FamilyRelationship> FamilyRelationships => Set<FamilyRelationship>();
         public DbSet<Generation> Generations => Set<Generation>();
+        public DbSet<LibraryAlbum> LibraryAlbums => Set<LibraryAlbum>();
+        public DbSet<LibraryPhoto> LibraryPhotos => Set<LibraryPhoto>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
+
+            modelBuilder.Entity<LibraryAlbum>(entity =>
+            {
+                entity.ToTable("library_albums");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedOnAdd();
+                entity.Property(e => e.Name).HasColumnName("name").HasMaxLength(150).IsRequired();
+                entity.Property(e => e.Description).HasColumnName("description").HasMaxLength(2000);
+                entity.Property(e => e.DriveFolderId).HasColumnName("drive_folder_id").HasMaxLength(255);
+                entity.HasIndex(e => e.DriveFolderId).IsUnique();
+                entity.Property(e => e.CoverPhotoId).HasColumnName("cover_photo_id");
+                entity.Property(e => e.CreatedByUserId).HasColumnName("created_by_user_id");
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.HasIndex(e => new { e.CreatedByUserId, e.UpdatedAt });
+                entity.HasOne(e => e.CreatedByUser).WithMany().HasForeignKey(e => e.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+                entity.HasOne(e => e.CoverPhoto).WithMany().HasForeignKey(e => e.CoverPhotoId).OnDelete(DeleteBehavior.SetNull);
+            });
+
+            modelBuilder.Entity<LibraryPhoto>(entity =>
+            {
+                entity.ToTable("library_photos");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedOnAdd();
+                entity.Property(e => e.AlbumId).HasColumnName("album_id");
+                entity.Property(e => e.DriveFileId).HasColumnName("drive_file_id").HasMaxLength(255).IsRequired();
+                entity.HasIndex(e => e.DriveFileId).IsUnique();
+                entity.Property(e => e.Url).HasColumnName("url").HasColumnType("text").IsRequired();
+                entity.Property(e => e.FileName).HasColumnName("file_name").HasMaxLength(255).IsRequired();
+                entity.Property(e => e.ContentType).HasColumnName("content_type").HasMaxLength(100).IsRequired();
+                entity.Property(e => e.FileSize).HasColumnName("file_size");
+                entity.Property(e => e.Caption).HasColumnName("caption").HasMaxLength(2000);
+                entity.Property(e => e.Title).HasColumnName("title").HasMaxLength(200);
+                entity.Property(e => e.Category).HasColumnName("category").HasMaxLength(20).HasDefaultValue("photos").IsRequired();
+                entity.Property(e => e.DisplayDate).HasColumnName("display_date").HasMaxLength(100);
+                entity.Property(e => e.Author).HasColumnName("author").HasMaxLength(200);
+                entity.Property(e => e.SortOrder).HasColumnName("sort_order").HasDefaultValue(0);
+                entity.Property(e => e.TakenAt).HasColumnName("taken_at");
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.HasOne(e => e.Album).WithMany(e => e.Photos).HasForeignKey(e => e.AlbumId).OnDelete(DeleteBehavior.Cascade);
+                entity.HasIndex(e => new { e.AlbumId, e.SortOrder, e.CreatedAt });
+            });
 
             // 1. Table USERS
             modelBuilder.Entity<User>(entity =>

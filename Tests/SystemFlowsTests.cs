@@ -15,6 +15,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 using MyLife.Shared.Data;
 using MyLife.Features.Auth.Services;
 using MyLife.Features.Avatar.Services;
+using MyLife.Features.Library.Services;
 using Npgsql;
 using Xunit;
 
@@ -64,6 +65,12 @@ public sealed class MyLifeFactory : WebApplicationFactory<Program>
             services.AddSingleton<TestAvatarStorage>();
             services.AddSingleton<IGoogleDriveAvatarService>(provider => provider.GetRequiredService<TestAvatarStorage>());
             services.AddSingleton<IGoogleCredentialVerifier, TestGoogleCredentialVerifier>();
+            services.RemoveAll<ILibraryStorageService>();
+            services.AddSingleton<TestLibraryStorage>();
+            services.AddSingleton<ILibraryStorageService>(provider => provider.GetRequiredService<TestLibraryStorage>());
+            services.AddSingleton<LibraryPersistenceFailureInterceptor>();
+            services.AddDbContext<AppDbContext>((provider, options) =>
+                options.AddInterceptors(provider.GetRequiredService<LibraryPersistenceFailureInterceptor>()));
             services.AddHttpClient(nameof(GoogleAvatarSyncService))
                 .ConfigurePrimaryHttpMessageHandler(() => new TestGoogleImageHandler());
         });

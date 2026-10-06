@@ -8,6 +8,7 @@ using MyLife.Shared.Data;
 using MyLife.Features.Auth.Services;
 using MyLife.Features.Avatar.Services;
 using MyLife.Features.FamilyTree.Services;
+using MyLife.Features.Library.Services;
 using MyLife.Shared.Security;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -43,6 +44,11 @@ builder.Services.AddScoped<IGoogleCredentialVerifier, GoogleCredentialVerifier>(
 builder.Services.AddScoped<IGoogleDriveAvatarService, GoogleDriveAvatarService>();
 builder.Services.AddScoped<IGoogleAvatarSyncService, GoogleAvatarSyncService>();
 builder.Services.AddScoped<IFamilyTreeService, FamilyTreeService>();
+builder.Services.AddHttpClient(nameof(GoogleDriveMemberAvatarService), client => client.Timeout = TimeSpan.FromSeconds(45));
+builder.Services.AddScoped<IGoogleDriveMemberAvatarService, GoogleDriveMemberAvatarService>();
+builder.Services.AddHttpClient(nameof(GoogleDriveLibraryStorageService), client => client.Timeout = TimeSpan.FromSeconds(45));
+builder.Services.AddScoped<ILibraryStorageService, GoogleDriveLibraryStorageService>();
+builder.Services.AddScoped<ILibraryService, LibraryService>();
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
     ?? (builder.Environment.IsDevelopment() ? ["http://localhost:7000"] : []);

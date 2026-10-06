@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using MyLife.Shared.Data;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace MyLife.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261006042455_AddLibraryModule")]
+    partial class AddLibraryModule
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -261,23 +264,10 @@ namespace MyLife.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("album_id");
 
-                    b.Property<string>("Author")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("author");
-
                     b.Property<string>("Caption")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)")
                         .HasColumnName("caption");
-
-                    b.Property<string>("Category")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasDefaultValue("photos")
-                        .HasColumnName("category");
 
                     b.Property<string>("ContentType")
                         .IsRequired()
@@ -290,11 +280,6 @@ namespace MyLife.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
-
-                    b.Property<string>("DisplayDate")
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)")
-                        .HasColumnName("display_date");
 
                     b.Property<string>("DriveFileId")
                         .IsRequired()
@@ -321,11 +306,6 @@ namespace MyLife.Migrations
                     b.Property<DateTime?>("TakenAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("taken_at");
-
-                    b.Property<string>("Title")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("title");
 
                     b.Property<string>("Url")
                         .IsRequired()

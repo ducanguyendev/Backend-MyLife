@@ -14,5 +14,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\MyLife.csproj" />
+    <None Update="fixtures/avatar-replacements.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -1,0 +1,65 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using MyLife.Features.Library.DTOs;
+using MyLife.Features.Library.Services;
+using MyLife.Shared.Data;
+
+namespace MyLife.Features.Library.Controllers;
+
+[ApiController, Authorize, Route("api/library")]
+public sealed class LibraryController(ILibraryService service, AppDbContext db) : ControllerBase
+{
+    [HttpPost("albums")]
+    public Task<IActionResult> Create(CreateAlbumDto dto) => Run(async (userId, ct) =>
+    {
+        var album = await service.CreateAlbumAsync(userId, dto, ct);
+        return CreatedAtAction(nameof(Get), new { albumId = album.Id }, album);
+    });
+
+    [HttpGet("albums")]
+    public Task<IActionResult> List() => Run(async (userId, ct) => Ok(await service.ListAlbumsAsync(userId, ct)));
+
+    [HttpGet("albums/{albumId:long}")]
+    public Task<IActionResult> Get(long albumId) => Run(async (userId, ct) => Ok(await service.GetAlbumAsync(userId, albumId, ct)));
+
+    [HttpPut("albums/{albumId:long}")]
+    public Task<IActionResult> Update(long albumId, UpdateAlbumDto dto) => Run(async (userId, ct) => Ok(await service.UpdateAlbumAsync(userId, albumId, dto, ct)));
+
+    [HttpPost("albums/{albumId:long}/photos")]
+    [RequestSizeLimit(LibraryUploadRules.MaximumRequestBytes)]
+    [RequestFormLimits(MultipartBodyLengthLimit = LibraryUploadRules.MaximumRequestBytes)]
+    public Task<IActionResult> Upload(long albumId, [FromForm] List<IFormFile> files, [FromForm] LibraryPhotoMetadataDto metadata) => Run(async (userId, ct) =>
+        StatusCode(201, await service.UploadPhotosAsync(userId, albumId, files, metadata, ct)));
+
+    [HttpPut("photos/{photoId:long}")]
+    public Task<IActionResult> UpdatePhoto(long photoId, LibraryPhotoMetadataDto metadata) =>
+        Run(async (userId, ct) => Ok(await service.UpdatePhotoAsync(userId, photoId, metadata, ct)));
+
+    [HttpDelete("photos/{photoId:long}")]
+    public Task<IActionResult> DeletePhoto(long photoId) => Run(async (userId, ct) =>
+    {
+        await service.DeletePhotoAsync(userId, photoId, ct);
+        return NoContent();
+    });
+
+    [HttpDelete("albums/{albumId:long}")]
+    public Task<IActionResult> DeleteAlbum(long albumId) => Run(async (userId, ct) =>
+    {
+        await service.DeleteAlbumAsync(userId, albumId, ct);
+        return NoContent();
+    });
+
+    private async Task<IActionResult> Run(Func<int, CancellationToken, Task<IActionResult>> action)
+    {
+        var email = User.FindFirstValue(ClaimTypes.Email) ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (string.IsNullOrWhiteSpace(email)) return Unauthorized(new { success = false, message = "The session is invalid." });
+        var normalized = email.Trim().ToLowerInvariant();
+        var id = await db.Users.AsNoTracking().Where(u => u.Email == normalized && u.IsActive).Select(u => (int?)u.Id)
+            .SingleOrDefaultAsync(HttpContext.RequestAborted);
+        if (id is null) return Unauthorized(new { success = false, message = "The session is invalid." });
+        try { return await action(id.Value, HttpContext.RequestAborted); }
+        catch (LibraryOperationException ex) { return StatusCode(ex.StatusCode, new { success = false, message = ex.Message }); }
+    }
+}
