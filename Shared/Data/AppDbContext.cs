@@ -22,10 +22,26 @@ namespace MyLife.Shared.Data
         public DbSet<Generation> Generations => Set<Generation>();
         public DbSet<LibraryAlbum> LibraryAlbums => Set<LibraryAlbum>();
         public DbSet<LibraryPhoto> LibraryPhotos => Set<LibraryPhoto>();
+        public DbSet<LibraryCategory> LibraryCategories => Set<LibraryCategory>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
+
+            modelBuilder.Entity<LibraryCategory>(entity =>
+            {
+                entity.ToTable("library_categories");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedOnAdd();
+                entity.Property(e => e.CreatedByUserId).HasColumnName("created_by_user_id");
+                entity.Property(e => e.Name).HasColumnName("name").HasMaxLength(100).IsRequired();
+                entity.Property(e => e.Slug).HasColumnName("slug").HasMaxLength(64).IsRequired();
+                entity.Property(e => e.IsDefault).HasColumnName("is_default");
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.HasIndex(e => new { e.CreatedByUserId, e.Slug }).IsUnique();
+                entity.HasOne(e => e.CreatedByUser).WithMany().HasForeignKey(e => e.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
+            });
 
             modelBuilder.Entity<LibraryAlbum>(entity =>
             {
@@ -59,7 +75,7 @@ namespace MyLife.Shared.Data
                 entity.Property(e => e.FileSize).HasColumnName("file_size");
                 entity.Property(e => e.Caption).HasColumnName("caption").HasMaxLength(2000);
                 entity.Property(e => e.Title).HasColumnName("title").HasMaxLength(200);
-                entity.Property(e => e.Category).HasColumnName("category").HasMaxLength(20).HasDefaultValue("photos").IsRequired();
+                entity.Property(e => e.Category).HasColumnName("category").HasMaxLength(64).HasDefaultValue("photos").IsRequired();
                 entity.Property(e => e.DisplayDate).HasColumnName("display_date").HasMaxLength(100);
                 entity.Property(e => e.Author).HasColumnName("author").HasMaxLength(200);
                 entity.Property(e => e.SortOrder).HasColumnName("sort_order").HasDefaultValue(0);

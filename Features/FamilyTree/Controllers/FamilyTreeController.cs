@@ -30,7 +30,7 @@ public abstract class FamilyTreeControllerBase(IFamilyTreeService service) : Con
         if (!ModelState.IsValid) return ValidationProblem(ModelState);
         try { var value = await operation(); return created ? StatusCode(201, new { success = true, data = value }) : Ok(new { success = true, data = value }); }
         catch (KeyNotFoundException) { return NotFound(Error("Family member not found.")); }
-        catch (ArgumentException ex) { return BadRequest(Error(ex.Message)); }
+        catch (ArgumentException ex) { return BadRequest(Error(ex.Message, ex is FamilyTreeValidationException validation ? validation.Code : "FAMILY_VALIDATION_FAILED")); }
     }
-    private static object Error(string message) => new { success = false, message };
+    private static object Error(string message, string code = "FAMILY_MEMBER_NOT_FOUND") => new { success = false, code, message };
 }

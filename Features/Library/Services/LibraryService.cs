@@ -6,7 +6,7 @@ using MyLife.Shared.Entities;
 
 namespace MyLife.Features.Library.Services;
 
-public sealed class LibraryService(AppDbContext db, ILibraryStorageService storage, ILogger<LibraryService> logger) : ILibraryService
+public sealed partial class LibraryService(AppDbContext db, ILibraryStorageService storage, ILogger<LibraryService> logger) : ILibraryService
 {
     public async Task<AlbumDto> CreateAlbumAsync(int userId, CreateAlbumDto dto, CancellationToken ct)
     {
@@ -69,9 +69,12 @@ public sealed class LibraryService(AppDbContext db, ILibraryStorageService stora
     {
         ValidatePhotoMetadata(metadata);
         if (files.Count is < 1 or > LibraryUploadRules.MaximumFiles)
-            throw new LibraryOperationException(400, "Upload between 1 and 20 photos per request.");
+            throw new LibraryOperationException(400, "Upload between 1 and 20 photos per request.", code: "LIBRARY_FILE_COUNT_INVALID");
         foreach (var file in files) LibraryUploadRules.ValidateFile(file);
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await LockCategoryRegistryAsync(userId, ct);
+        await EnsureDefaultCategoriesCoreAsync(userId, ct);
+        await ValidateCategoryAsync(userId, metadata.Category, ct);
         var album = await LockAlbumAsync(userId, albumId, ct);
         var folderId = RequireFolder(album);
         var uploadedIds = new HashSet<string>(StringComparer.Ordinal);
@@ -85,7 +88,7 @@ public sealed class LibraryService(AppDbContext db, ILibraryStorageService stora
                 var content = stream.ToArray();
                 var mime = LibraryUploadRules.NormalizeContentType(file.ContentType);
                 if (content.Length != file.Length || !LibraryUploadRules.HasMatchingSignature(content, mime))
-                    throw new LibraryOperationException(400, "Photo bytes do not match the declared image type.");
+                    throw new LibraryOperationException(400, "Photo bytes do not match the declared image type.", code: "LIBRARY_INVALID_IMAGE");
                 var result = await storage.UploadPhotoAsync(folderId, content, mime, file.FileName, ct);
                 if (!string.IsNullOrWhiteSpace(result.FileId)) uploadedIds.Add(result.FileId);
                 if (!result.Success || string.IsNullOrWhiteSpace(result.FileId) ||
@@ -140,6 +143,9 @@ public sealed class LibraryService(AppDbContext db, ILibraryStorageService stora
         var albumId = await db.LibraryPhotos.AsNoTracking().Where(p => p.Id == photoId && p.Album.CreatedByUserId == userId)
             .Select(p => (long?)p.AlbumId).SingleOrDefaultAsync(ct) ?? throw NotFound();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await LockCategoryRegistryAsync(userId, ct);
+        await EnsureDefaultCategoriesCoreAsync(userId, ct);
+        await ValidateCategoryAsync(userId, metadata.Category, ct);
         var album = await LockAlbumAsync(userId, albumId, ct);
         var photo = await db.LibraryPhotos.SingleOrDefaultAsync(p => p.Id == photoId && p.AlbumId == albumId, ct) ?? throw NotFound();
         ApplyMetadata(photo, metadata);
@@ -180,13 +186,13 @@ public sealed class LibraryService(AppDbContext db, ILibraryStorageService stora
         new(album.Id, album.Name, album.Description, count, coverUrl, album.CreatedAt, album.UpdatedAt);
     private static PhotoDto ToPhotoDto(LibraryPhoto photo) => new(photo.Id, photo.Url, photo.FileName,
         photo.ContentType, photo.FileSize, photo.Caption, photo.SortOrder, photo.TakenAt, photo.CreatedAt,
-        photo.Title, photo.Category, photo.DisplayDate, photo.Author);
+        photo.Title, photo.Category, photo.DisplayDate, photo.Author, photo.DriveFileId);
     private static void ValidatePhotoMetadata(LibraryPhotoMetadataDto metadata)
     {
-        if (metadata.Category is not ("photos" or "decrees" or "events" or "temple") ||
+        if (string.IsNullOrWhiteSpace(metadata.Category) || metadata.Category.Length > 64 || metadata.Category == "all" ||
             metadata.Title?.Length > 200 || metadata.DisplayDate?.Length > 100 ||
             metadata.Description?.Length > 2000 || metadata.Author?.Length > 200)
-            throw new LibraryOperationException(400, "Invalid Library photo metadata or category.");
+            throw new LibraryOperationException(400, "Invalid Library photo metadata or category.", code: "LIBRARY_METADATA_INVALID");
     }
     private static void ApplyMetadata(LibraryPhoto photo, LibraryPhotoMetadataDto metadata)
     {
@@ -198,7 +204,7 @@ public sealed class LibraryService(AppDbContext db, ILibraryStorageService stora
     }
     private static LibraryOperationException NotFound() => new(404, "Library album or photo not found.");
     private static string RequireFolder(LibraryAlbum album) => !string.IsNullOrWhiteSpace(album.DriveFolderId)
-        ? album.DriveFolderId : throw new LibraryOperationException(503, "The album Drive folder is unavailable.");
+        ? album.DriveFolderId : throw new LibraryOperationException(503, "The album Drive folder is unavailable.", code: "LIBRARY_ALBUM_UNAVAILABLE");
     private static string? NormalizeDescription(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static void ValidateMetadata(string name, string? description)
     {
@@ -208,7 +214,8 @@ public sealed class LibraryService(AppDbContext db, ILibraryStorageService stora
     private static LibraryOperationException Failure(Exception error, bool cleaned) => new(
         error is LibraryOperationException failure ? failure.StatusCode : 503,
         (error is LibraryOperationException known ? known.Message : "Library persistence failed. No successful result was reported.") +
-        (cleaned ? "" : " Drive cleanup is incomplete; retry or contact the administrator."), error);
+        (cleaned ? "" : " Drive cleanup is incomplete; retry or contact the administrator."), error,
+        !cleaned ? "LIBRARY_CLEANUP_FAILED" : error is LibraryOperationException coded ? coded.Code : "LIBRARY_SAVE_FAILED");
 
     private async Task RollbackAsync(IDbContextTransaction transaction, long albumId)
     {

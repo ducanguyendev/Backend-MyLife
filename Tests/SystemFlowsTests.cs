@@ -224,8 +224,15 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
         Assert.Equal(a, (await Body(await Get($"/api/family-tree/{b}", token))).GetProperty("data").GetProperty("spouseId").GetInt32());
         Assert.Equal(HttpStatusCode.OK, (await Put($"/api/family-tree/{a}", Member("Alpha", "Nam", spouseId: c), token)).StatusCode);
         Assert.Equal(JsonValueKind.Null, (await Body(await Get($"/api/family-tree/{b}", token))).GetProperty("data").GetProperty("spouseId").ValueKind);
-        Assert.Equal(HttpStatusCode.BadRequest, (await Put($"/api/family-tree/{a}", Member("Alpha", "Nam", spouseId: a), token)).StatusCode);
-        Assert.Equal(HttpStatusCode.BadRequest, (await Put($"/api/family-tree/{a}", Member("Alpha", "Nam", fatherId: 999999), token)).StatusCode);
+        using var selfRelation = await Put($"/api/family-tree/{a}", Member("Alpha", "Nam", spouseId: a), token);
+        Assert.Equal(HttpStatusCode.BadRequest, selfRelation.StatusCode);
+        Assert.Equal("FAMILY_SELF_RELATION", (await Body(selfRelation)).GetProperty("code").GetString());
+        using var missingRelated = await Put($"/api/family-tree/{a}", Member("Alpha", "Nam", fatherId: 999999), token);
+        Assert.Equal(HttpStatusCode.BadRequest, missingRelated.StatusCode);
+        Assert.Equal("FAMILY_RELATED_MEMBER_NOT_FOUND", (await Body(missingRelated)).GetProperty("code").GetString());
+        using var missingMember = await Get("/api/family-tree/2147483647", token);
+        Assert.Equal(HttpStatusCode.NotFound, missingMember.StatusCode);
+        Assert.Equal("FAMILY_MEMBER_NOT_FOUND", (await Body(missingMember)).GetProperty("code").GetString());
         Assert.Equal(HttpStatusCode.OK, (await Put($"/api/family-tree/{b}", Member("Beta", "Nữ", fatherId: a), token)).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await Put($"/api/family-tree/{a}", new
             { fullName = "Alpha", generation = 1, gender = "Nam", fatherId = b }, token)).StatusCode);

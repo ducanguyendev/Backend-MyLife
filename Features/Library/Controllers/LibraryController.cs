@@ -11,6 +11,19 @@ namespace MyLife.Features.Library.Controllers;
 [ApiController, Authorize, Route("api/library")]
 public sealed class LibraryController(ILibraryService service, AppDbContext db) : ControllerBase
 {
+    [HttpGet("categories")]
+    public Task<IActionResult> Categories() => Run(async (userId, ct) => Ok(await service.ListCategoriesAsync(userId, ct)));
+
+    [HttpPost("categories")]
+    public Task<IActionResult> CreateCategory(CreateLibraryCategoryDto dto) =>
+        Run(async (userId, ct) => StatusCode(201, await service.CreateCategoryAsync(userId, dto, ct)));
+
+    [HttpDelete("categories/{categoryId:long}")]
+    public Task<IActionResult> DeleteCategory(long categoryId) => Run(async (userId, ct) =>
+    {
+        await service.DeleteCategoryAsync(userId, categoryId, ct);
+        return NoContent();
+    });
     [HttpPost("albums")]
     public Task<IActionResult> Create(CreateAlbumDto dto) => Run(async (userId, ct) =>
     {
@@ -54,12 +67,12 @@ public sealed class LibraryController(ILibraryService service, AppDbContext db) 
     private async Task<IActionResult> Run(Func<int, CancellationToken, Task<IActionResult>> action)
     {
         var email = User.FindFirstValue(ClaimTypes.Email) ?? User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (string.IsNullOrWhiteSpace(email)) return Unauthorized(new { success = false, message = "The session is invalid." });
+        if (string.IsNullOrWhiteSpace(email)) return Unauthorized(new { success = false, code = "AUTH_SESSION_INVALID", message = "The session is invalid." });
         var normalized = email.Trim().ToLowerInvariant();
         var id = await db.Users.AsNoTracking().Where(u => u.Email == normalized && u.IsActive).Select(u => (int?)u.Id)
             .SingleOrDefaultAsync(HttpContext.RequestAborted);
-        if (id is null) return Unauthorized(new { success = false, message = "The session is invalid." });
+        if (id is null) return Unauthorized(new { success = false, code = "AUTH_SESSION_INVALID", message = "The session is invalid." });
         try { return await action(id.Value, HttpContext.RequestAborted); }
-        catch (LibraryOperationException ex) { return StatusCode(ex.StatusCode, new { success = false, message = ex.Message }); }
+        catch (LibraryOperationException ex) { return StatusCode(ex.StatusCode, new { success = false, code = ex.Code, message = ex.Message }); }
     }
 }

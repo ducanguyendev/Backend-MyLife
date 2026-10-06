@@ -4,6 +4,10 @@ namespace MyLife.Features.Library.Services;
 
 public interface ILibraryService
 {
+    Task EnsureDefaultLibraryCategoriesAsync(int userId, CancellationToken ct);
+    Task<IReadOnlyList<LibraryCategoryDto>> ListCategoriesAsync(int userId, CancellationToken ct);
+    Task<LibraryCategoryDto> CreateCategoryAsync(int userId, CreateLibraryCategoryDto dto, CancellationToken ct);
+    Task DeleteCategoryAsync(int userId, long categoryId, CancellationToken ct);
     Task<AlbumDto> CreateAlbumAsync(int userId, CreateAlbumDto dto, CancellationToken ct);
     Task<IReadOnlyList<AlbumDto>> ListAlbumsAsync(int userId, CancellationToken ct);
     Task<AlbumDetailDto> GetAlbumAsync(int userId, long albumId, CancellationToken ct);

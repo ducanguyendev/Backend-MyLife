@@ -66,7 +66,7 @@ public sealed class FamilyTreeService(AppDbContext context) : IFamilyTreeService
         var spouse = await context.FamilyMembers.SingleAsync(x => x.Id == spouseId.Value);
         if (spouse.SpouseId is int otherId && otherId != member.Id)
         {
-            throw new ArgumentException("The selected spouse is already linked to another member.");
+            throw new FamilyTreeValidationException("FAMILY_SPOUSE_IN_USE", "The selected spouse is already linked to another member.");
         }
         spouse.SpouseId = member.Id; spouse.UpdatedAt = DateTime.UtcNow;
     }
@@ -110,14 +110,14 @@ public sealed class FamilyTreeService(AppDbContext context) : IFamilyTreeService
     {
         var ids = new[] { fatherId, motherId, spouseId }.Where(x => x.HasValue).Select(x => x!.Value)
             .Concat(childIds ?? []).Concat(horizontal?.Select(x => x.MemberId) ?? []).ToHashSet();
-        if (memberId is int self && ids.Contains(self)) throw new ArgumentException("A family member cannot be related to themselves.");
-        if (fatherId.HasValue && fatherId == motherId) throw new ArgumentException("Father and mother must be different members.");
+        if (memberId is int self && ids.Contains(self)) throw new FamilyTreeValidationException("FAMILY_SELF_RELATION", "A family member cannot be related to themselves.");
+        if (fatherId.HasValue && fatherId == motherId) throw new FamilyTreeValidationException("FAMILY_PARENTS_MUST_DIFFER", "Father and mother must be different members.");
         var nodes = await context.FamilyMembers.AsNoTracking().Select(x => new { x.Id, x.FatherId, x.MotherId, x.SpouseId }).ToListAsync();
-        if (!ids.All(id => nodes.Any(x => x.Id == id))) throw new ArgumentException("One or more related family members do not exist.");
+        if (!ids.All(id => nodes.Any(x => x.Id == id))) throw new FamilyTreeValidationException("FAMILY_RELATED_MEMBER_NOT_FOUND", "One or more related family members do not exist.");
         if (spouseId is int spouse && nodes.Single(x => x.Id == spouse).SpouseId is int other && other != memberId)
-            throw new ArgumentException("The selected spouse is already linked to another member.");
+            throw new FamilyTreeValidationException("FAMILY_SPOUSE_IN_USE", "The selected spouse is already linked to another member.");
         if (horizontal?.Any(x => string.IsNullOrWhiteSpace(x.RelationType) || x.RelationType.Trim().Length > 50) == true)
-            throw new ArgumentException("A horizontal relationship type of at most 50 characters is required.");
+            throw new FamilyTreeValidationException("FAMILY_RELATIONSHIP_INVALID", "A horizontal relationship type of at most 50 characters is required.");
 
         // Validate the entire proposed graph, including simultaneous parent and child edits.
         // Checking each ID against the old graph would miss A.parent=B plus A.children=[B].
@@ -158,7 +158,7 @@ public sealed class FamilyTreeService(AppDbContext context) : IFamilyTreeService
             complete.Add(id);
             return false;
         }
-        if (affected.Any(HasCycle)) throw new ArgumentException("A parent-child relationship would create a cycle.");
+        if (affected.Any(HasCycle)) throw new FamilyTreeValidationException("FAMILY_RELATIONSHIP_CYCLE", "A parent-child relationship would create a cycle.");
     }
 
     private IQueryable<FamilyMember> MembersQuery() => context.FamilyMembers.Include(x => x.Father).Include(x => x.Mother).Include(x => x.Spouse)

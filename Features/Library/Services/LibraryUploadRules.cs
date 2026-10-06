@@ -12,21 +12,21 @@ public static class LibraryUploadRules
     public static string ExtensionFor(string contentType) => contentType switch
     {
         "image/jpeg" => ".jpg", "image/png" => ".png", "image/webp" => ".webp", "image/gif" => ".gif",
-        _ => throw new LibraryOperationException(400, "Only JPG, PNG, WEBP and GIF images are supported.")
+        _ => throw new LibraryOperationException(400, "Only JPG, PNG, WEBP and GIF images are supported.", code: "LIBRARY_INVALID_IMAGE")
     };
 
     public static void ValidateFile(IFormFile file)
     {
         if (file.Length is <= 0 or > MaximumPhotoBytes)
-            throw new LibraryOperationException(400, "Each photo must be between 1 byte and 5 MB.");
+            throw new LibraryOperationException(400, "Each photo must be between 1 byte and 5 MB.", code: "LIBRARY_IMAGE_SIZE_INVALID");
         var name = file.FileName;
         if (string.IsNullOrWhiteSpace(name) || name.Length > 255 || name.Any(char.IsControl) || name.Contains('/') || name.Contains('\\'))
-            throw new LibraryOperationException(400, "A photo filename must be a safe filename, up to 255 characters, without paths.");
+            throw new LibraryOperationException(400, "A photo filename must be a safe filename, up to 255 characters, without paths.", code: "LIBRARY_INVALID_IMAGE");
         var mime = NormalizeContentType(file.ContentType);
         var expected = ExtensionFor(mime);
         var extension = Path.GetExtension(name).ToLowerInvariant();
         if (extension != expected && !(mime == "image/jpeg" && extension == ".jpeg"))
-            throw new LibraryOperationException(400, "Photo extension and MIME type must match.");
+            throw new LibraryOperationException(400, "Photo extension and MIME type must match.", code: "LIBRARY_INVALID_IMAGE");
     }
 
     public static bool HasMatchingSignature(byte[] content, string contentType) => contentType switch
@@ -39,7 +39,10 @@ public static class LibraryUploadRules
     };
 }
 
-public sealed class LibraryOperationException(int statusCode, string message, Exception? innerException = null) : Exception(message, innerException)
+public sealed class LibraryOperationException(int statusCode, string message, Exception? innerException = null, string? code = null) : Exception(message, innerException)
 {
     public int StatusCode { get; } = statusCode;
+    public string Code { get; } = code ?? statusCode switch {
+        400 => "LIBRARY_VALIDATION_FAILED", 404 => "LIBRARY_NOT_FOUND", 502 => "LIBRARY_STORAGE_FAILED", _ => "LIBRARY_SAVE_FAILED"
+    };
 }

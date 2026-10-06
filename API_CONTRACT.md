@@ -2,6 +2,12 @@
 
 All authenticated endpoints accept the `AccessToken` HttpOnly cookie or a Bearer access token. Errors use `{ "success": false, "message": "..." }`; validation responses may additionally contain `errors`.
 
+FamilyTree/Library business errors also include a machine-readable `code` for
+frontend localization. HTTP status and English diagnostic messages are retained.
+Frontend owns success messages, prefers error codes, then status/action-based
+i18n fallbacks; it does not render raw backend messages in these features.
+Automatic model-validation ProblemDetails may have `errors` without `code`.
+
 Browser mutations send `credentials: include` and `X-Requested-With: MyLife`; JavaScript never receives or stores tokens. Native clients send `X-Client-Platform: mobile` and receive token fields in login/Google/refresh responses.
 
 ## Auth
@@ -48,6 +54,9 @@ returns 404, and list includes only the caller's albums.
 | PUT | `/api/library/photos/{photoId}` | JSON photo metadata; 200 `PhotoDto`. Edits DB metadata only, preserving Drive file ID/bytes. |
 | DELETE | `/api/library/photos/{photoId}` | Drive trash first, then DB delete; 204. Clears cover when applicable. |
 | DELETE | `/api/library/albums/{albumId}` | Drive folder trash first, then DB cascade; 204. |
+| GET | `/api/library/categories` | 200 `LibraryCategoryDto[]`; ensures this user's four defaults idempotently; sorted isDefault descending, name then id ascending. |
+| POST | `/api/library/categories` | JSON `{ "name": "Du lịch" }`; 201 `LibraryCategoryDto`. Server owns slug, owner and isDefault. |
+| DELETE | `/api/library/categories/{id}` | 204 for an unused custom category owned by the caller; 404 when missing/not owned; 409 for default/in-use categories. |
 
 Library success payloads are direct DTOs/arrays, not `{ success, data }` wrappers.
 Errors retain `{ "success": false, "message": "..." }`: 400 validation, 401 auth,
@@ -55,7 +64,7 @@ Errors retain `{ "success": false, "message": "..." }`: 400 validation, 401 auth
 folder. Oversized request bodies can be rejected with 413 before the controller.
 
 `AlbumDto`: `id`, `name`, `description`, `photoCount`, `coverPhotoUrl`, `createdAt`,
-`updatedAt`. Detail adds `photos`. `PhotoDto`: `id`, `url`, `fileName`, `contentType`,
+`updatedAt`. Detail adds `photos`. `PhotoDto`: `id`, `driveFileId`, `url`, `fileName`, `contentType`,
 `fileSize`, `caption`, `sortOrder`, `takenAt`, `createdAt`, `title`, `category`,
 `displayDate`, `description`, `author`. IDs are Int64; timestamps are UTC.
 `description` aliases the existing `caption` column. TakenAt/cover selection
@@ -71,7 +80,9 @@ fields clear to null):
   "description": "Ảnh họp mặt gia đình", "author": "Gia đình" }
 ```
 
-Category is `photos`, `decrees`, `events`, or `temple` (default `photos`);
+Category is a slug (max 64) from the caller's registry. Four defaults are
+`photos`, `decrees`, `events`, `temple`; omitted category defaults to `photos`.
+Upload and edit ensure defaults and validate ownership before assigning a slug;
 `all` is a frontend-only filter and is rejected. Title/author max 200,
 displayDate max 100, description max 2000; blank strings normalize to null.
 DisplayDate is free-form display text and does not change `takenAt`.
@@ -153,6 +164,29 @@ the stable file ID; this storage client does not change current FamilyTree CRUD.
 Family-tree responses wrap payloads in `{ success, data }`. All routes require authentication.
 
 The same suffixes are available under `/api/admin/family-tree`; every admin alias requires role `ADMIN`.
+
+FamilyTree codes: `FAMILY_MEMBER_NOT_FOUND`, `FAMILY_RELATED_MEMBER_NOT_FOUND`,
+`FAMILY_SELF_RELATION`, `FAMILY_PARENTS_MUST_DIFFER`, `FAMILY_SPOUSE_IN_USE`,
+`FAMILY_RELATIONSHIP_INVALID`, `FAMILY_RELATIONSHIP_CYCLE`, `FAMILY_VALIDATION_FAILED`.
+Library codes: `LIBRARY_NOT_FOUND`, `LIBRARY_INVALID_IMAGE`,
+`LIBRARY_IMAGE_SIZE_INVALID`, `LIBRARY_FILE_COUNT_INVALID`, `LIBRARY_METADATA_INVALID`,
+`LIBRARY_VALIDATION_FAILED`, `LIBRARY_STORAGE_FAILED`, `LIBRARY_SAVE_FAILED`,
+`LIBRARY_ALBUM_UNAVAILABLE`, `LIBRARY_CLEANUP_FAILED`; an invalid active-user
+session can return `AUTH_SESSION_INVALID` with 401.
+
+`LibraryCategoryDto`: `id`, `name`, `slug`, `isDefault`. Category name is required,
+trimmed, max 100 characters. Vietnamese slug normalization removes accents,
+converts Đ/đ to d, lowercases and collapses punctuation to hyphens; collisions
+use suffixes -2, -3 while staying within 64 characters. Empty ASCII slugs use
+`category`; `all` is reserved and becomes `all-category`. A per-user PostgreSQL
+row lock serializes category creation/deletion and photo category assignments;
+unique `(created_by_user_id, slug)` provides a database constraint too.
+Category errors: `LIBRARY_CATEGORY_INVALID` (400), `LIBRARY_CATEGORY_NOT_FOUND`
+(404), `LIBRARY_CATEGORY_CANNOT_DELETE` and `LIBRARY_CATEGORY_IN_USE` (409).
+DriveFileId is read-only in PhotoDto; photo write DTOs cannot change storage
+identity. The UI tries stored URL then the Drive thumbnail once per candidate,
+shows a localized placeholder on failure, and opens the original Drive view
+when the ID is available. Existing stored URLs and media are unchanged.
 
 ## Administration
 

@@ -33,10 +33,10 @@ public static class DatabaseStartup
             if (columns.Keys.Any(x => x.Table == "__EFMigrationsHistory")) return;
             // New Library tables are created by their migration, not expected
             // in the pre-migration legacy baseline.
-            if (columns.Keys.Any(x => x.Table is "library_albums" or "library_photos"))
+            if (columns.Keys.Any(x => x.Table is "library_albums" or "library_photos" or "library_categories"))
                 throw new InvalidOperationException("Library tables exist without migration history; review the legacy schema manually.");
             var entities = db.Model.GetEntityTypes()
-                .Where(e => e.GetTableName() is not ("library_albums" or "library_photos")).ToList();
+                .Where(e => e.GetTableName() is not ("library_albums" or "library_photos" or "library_categories")).ToList();
             if (!entities.Any(e => columns.Keys.Any(x => x.Table == e.GetTableName()))) return;
             if (!configuration.GetValue<bool>("Database:AllowLegacyBaseline"))
                 throw new InvalidOperationException("A legacy database without migration history was detected. Back up the database and explicitly enable Database:AllowLegacyBaseline for this upgrade.");
