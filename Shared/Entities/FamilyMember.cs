@@ -68,6 +68,11 @@ namespace MyLife.Shared.Entities
         [Column("updated_at")]
         public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 
+        [Column("family_tree_id")]
+        public long FamilyTreeId { get; set; }
+
+        public FamilyTree FamilyTree { get; set; } = null!;
+
         // Navigation properties
         [ForeignKey("FatherId")]
         public virtual FamilyMember? Father { get; set; }

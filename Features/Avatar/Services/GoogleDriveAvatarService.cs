@@ -79,7 +79,7 @@ public sealed class GoogleDriveAvatarService(
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            logger.LogWarning(ex, "Avatar upload storage call failed");
+            logger.LogWarning("Avatar upload storage call failed ErrorType={ErrorType}", ex.GetType().Name);
             return new(false, null, null);
         }
     }
@@ -105,7 +105,7 @@ public sealed class GoogleDriveAvatarService(
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            logger.LogWarning(ex, "Avatar deletion storage call failed");
+            logger.LogWarning("Avatar deletion storage call failed ErrorType={ErrorType}", ex.GetType().Name);
             return false;
         }
     }
@@ -129,7 +129,7 @@ public sealed class GoogleDriveAvatarService(
         }
         catch (JsonException ex)
         {
-            logger.LogError(ex, "Failed to parse avatar storage JSON. ResponseLength={ResponseLength}", rawContent.Length);
+            logger.LogError("Failed to parse avatar storage JSON ErrorType={ErrorType} ResponseLength={ResponseLength}", ex.GetType().Name, rawContent.Length);
             return null;
         }
     }

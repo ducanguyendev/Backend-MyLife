@@ -23,7 +23,7 @@ Browser mutations send `credentials: include` and `X-Requested-With: MyLife`; Ja
 | PUT | `/api/me/profile` | Authenticated profile update. |
 | POST | `/api/auth/change-password` | Local-provider accounts only. |
 
-`user.id` is an integer and `role` is always `ADMIN` or `USER`. `authProvider` is retained only as legacy account-origin data; `loginProviders.local` and `loginProviders.google` describe usable methods.
+`user.id` is an integer and `role` is always `ADMIN` or `USER`. The business model is ADMIN XOR USER: exactly one supported role. The compatibility `roles` array contains only that primary role. Ambiguous supported-role assignments are refused by login, refresh and JWT validation. ADMIN does not imply USER. `authProvider` is retained only as legacy account-origin data; `loginProviders.local` and `loginProviders.google` describe usable methods.
 
 ## Avatar
 
@@ -39,10 +39,10 @@ The deployable Apps Script implementation and its backend payload contract are i
 
 ## Library / albums — Phase 1
 
-Every route below requires an active authenticated user. Albums belong to their
-`created_by_user_id`; this ID comes from the session, never a client field. Admins
-also access only their own albums in this phase. An inaccessible album/photo
-returns 404, and list includes only the caller's albums.
+Every route below requires an active account with role `USER`. Admin-only
+accounts receive 403; anonymous requests receive 401. Albums belong to their
+`created_by_user_id`; this ID comes from the session, never a client field.
+An inaccessible album/photo returns 404, and list includes only the caller's albums.
 
 | Method | Route | Body / result |
 | --- | --- | --- |
@@ -56,6 +56,7 @@ returns 404, and list includes only the caller's albums.
 | DELETE | `/api/library/albums/{albumId}` | Drive folder trash first, then DB cascade; 204. |
 | GET | `/api/library/categories` | 200 `LibraryCategoryDto[]`; ensures this user's four defaults idempotently; sorted isDefault descending, name then id ascending. |
 | POST | `/api/library/categories` | JSON `{ "name": "Du lịch" }`; 201 `LibraryCategoryDto`. Server owns slug, owner and isDefault. |
+| PUT | `/api/library/categories/{id}` | JSON `{ "name": "Du lịch gia đình" }`; 200 `LibraryCategoryDto`. Only owned custom categories can be renamed; slug stays unchanged. |
 | DELETE | `/api/library/categories/{id}` | 204 for an unused custom category owned by the caller; 404 when missing/not owned; 409 for default/in-use categories. |
 
 Library success payloads are direct DTOs/arrays, not `{ success, data }` wrappers.
@@ -161,9 +162,11 @@ the stable file ID; this storage client does not change current FamilyTree CRUD.
 | PUT | `/api/family-tree/{id}` |
 | DELETE | `/api/family-tree/{id}` |
 
-Family-tree responses wrap payloads in `{ success, data }`. All routes require authentication.
+Family-tree responses wrap payloads in `{ success, data }`. All routes require role `USER` on an active account (Admin-only: 403; anonymous: 401).
 
-The same suffixes are available under `/api/admin/family-tree`; every admin alias requires role `ADMIN`.
+Each USER has one private FamilyTree, lazily created by the first member request. The server resolves its unique owner from the validated session; clients cannot select an owner or FamilyTreeId. Member list/detail/update/delete and all relationship validation are scoped to that tree. A missing or foreign member ID returns 404 `FAMILY_MEMBER_NOT_FOUND`; a foreign father/mother/spouse/child/horizontal reference returns 400 `FAMILY_RELATED_MEMBER_NOT_FOUND`. Names can repeat across trees. Generation records remain a shared read-only reference catalog.
+
+The legacy `/api/admin/family-tree` route family has been removed (404); it cannot be used to bypass the USER requirement.
 
 FamilyTree codes: `FAMILY_MEMBER_NOT_FOUND`, `FAMILY_RELATED_MEMBER_NOT_FOUND`,
 `FAMILY_SELF_RELATION`, `FAMILY_PARENTS_MUST_DIFFER`, `FAMILY_SPOUSE_IN_USE`,
@@ -179,10 +182,13 @@ trimmed, max 100 characters. Vietnamese slug normalization removes accents,
 converts Đ/đ to d, lowercases and collapses punctuation to hyphens; collisions
 use suffixes -2, -3 while staying within 64 characters. Empty ASCII slugs use
 `category`; `all` is reserved and becomes `all-category`. A per-user PostgreSQL
-row lock serializes category creation/deletion and photo category assignments;
+row lock serializes category creation/rename/deletion and photo category assignments;
 unique `(created_by_user_id, slug)` provides a database constraint too.
 Category errors: `LIBRARY_CATEGORY_INVALID` (400), `LIBRARY_CATEGORY_NOT_FOUND`
-(404), `LIBRARY_CATEGORY_CANNOT_DELETE` and `LIBRARY_CATEGORY_IN_USE` (409).
+(404), `LIBRARY_CATEGORY_CANNOT_EDIT`, `LIBRARY_CATEGORY_CANNOT_DELETE` and `LIBRARY_CATEGORY_IN_USE` (409).
+PUT accepts only `UpdateLibraryCategoryDto.Name`: it changes Name and UpdatedAt,
+never slug, ownership, default flag or photo rows. In-use custom categories can
+be renamed (Du lịch → Du lịch gia đình retains slug `du-lich`).
 DriveFileId is read-only in PhotoDto; photo write DTOs cannot change storage
 identity. The UI tries stored URL then the Drive thumbnail once per candidate,
 shows a localized placeholder on failure, and opens the original Drive view
@@ -200,3 +206,13 @@ Every administrative endpoint requires role `ADMIN`.
 | PUT | `/api/admin/users/{id}/role` | `{ "role": "ADMIN" }` or `{ "role": "USER" }` |
 | DELETE | `/api/admin/users/{id}` | |
 | GET | `/api/admin/logs` | Latest login audit entries. |
+
+Deletion of a user with a nonempty tree returns 409 `USER_HAS_FAMILY_MEMBERS`; it never cascades family members. An empty tree is explicitly removed in the user-delete transaction.
+
+## Web runtime
+
+Auth login/register/Google: 10 requests/minute/IP; refresh: 30/minute/IP; account avatar and Library uploads: 10/minute/validated user. Configurable named fixed-window policies use no queue. Raw forwarded headers are not trusted. Exceeding a limit returns 429 `{ success: false, code: "RATE_LIMITED", message: "..." }` with Retry-After.
+
+`GET /health/live` checks the process only; `GET /health/ready` checks PostgreSQL (200 healthy, 503 unavailable), exposing no connection details. Responses expose a validated/generated X-Request-ID. FamilyTree/Library JSON and health responses support gzip/Brotli when requested; token-issuing auth responses are excluded. No private response output caching is enabled.
+
+Production defaults Database:AutoMigrate to false and fails startup when migrations are pending. Apply reviewed migrations separately before startup; seed runs only with explicitly enabled migration initialization. Development defaults remain convenient. See MYLIFE_WEB_OPTIMIZATION_REPORT.md for the unapplied AddPerUserFamilyTrees migration and review steps.

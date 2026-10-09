@@ -21,7 +21,7 @@ using Xunit;
 
 [assembly: CollectionBehavior(DisableTestParallelization = true)]
 
-public sealed class MyLifeFactory : WebApplicationFactory<Program>
+public class MyLifeFactory : WebApplicationFactory<Program>
 {
     public static readonly string ConnectionString = Environment.GetEnvironmentVariable("MYLIFE_TEST_DATABASE")
         ?? "Host=127.0.0.1;Port=55439;Database=mylife_validation;Username=mylife_test;Include Error Detail=false";
@@ -40,6 +40,9 @@ public sealed class MyLifeFactory : WebApplicationFactory<Program>
         Environment.SetEnvironmentVariable("SeedAdmin__Email", "integration.admin@gmail.com");
         Environment.SetEnvironmentVariable("SeedAdmin__Password", "Admin_Test!234567");
         Environment.SetEnvironmentVariable("Cors__AllowedOrigins__0", "http://localhost:7000");
+        Environment.SetEnvironmentVariable("RateLimits__Auth__PermitLimit", "10000");
+        Environment.SetEnvironmentVariable("RateLimits__Refresh__PermitLimit", "10000");
+        Environment.SetEnvironmentVariable("RateLimits__Upload__PermitLimit", "10000");
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -135,10 +138,52 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
         Assert.Equal(HttpStatusCode.OK, (await Post("/api/logout", new
             { accessToken = logout.AccessToken, refreshToken = logout.RefreshToken })).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await Refresh(logout)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await Delete($"/api/admin/users/{targetId}", admin.AccessToken)).StatusCode);
+        foreach (var member in (await Body(await Get("/api/family-tree", fresh.AccessToken))).GetProperty("data").EnumerateArray())
+            Assert.Equal(HttpStatusCode.OK, (await Delete($"/api/family-tree/{member.GetProperty("id").GetInt32()}", fresh.AccessToken)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await Delete($"/api/admin/users/{targetId}", admin.AccessToken)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await Get("/api/me", fresh.AccessToken)).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await Post("/api/auth/google", new
             { idToken = "not.a.valid.google.token" })).StatusCode);
+    }
+
+    [Fact]
+    public async Task Family_tree_and_library_require_actual_user_role_and_retire_admin_alias()
+    {
+        var admin = await Login("integration.admin@gmail.com", "Admin_Test!234567");
+        var endpoints = new (HttpMethod Method, string Path)[] {
+            (HttpMethod.Get, "/api/family-tree"), (HttpMethod.Get, "/api/family-tree/generations"),
+            (HttpMethod.Get, "/api/family-tree/1"), (HttpMethod.Post, "/api/family-tree"),
+            (HttpMethod.Put, "/api/family-tree/1"), (HttpMethod.Delete, "/api/family-tree/1"),
+            (HttpMethod.Get, "/api/library/categories"), (HttpMethod.Post, "/api/library/categories"),
+            (HttpMethod.Put, "/api/library/categories/1"), (HttpMethod.Delete, "/api/library/categories/1"),
+            (HttpMethod.Get, "/api/library/albums"), (HttpMethod.Post, "/api/library/albums"),
+            (HttpMethod.Get, "/api/library/albums/1"), (HttpMethod.Put, "/api/library/albums/1"),
+            (HttpMethod.Delete, "/api/library/albums/1"), (HttpMethod.Post, "/api/library/albums/1/photos"),
+            (HttpMethod.Put, "/api/library/photos/1"), (HttpMethod.Delete, "/api/library/photos/1")
+        };
+        foreach (var (method, path) in endpoints)
+        {
+            using var anonymous = await Send(method, path, new { name = "Test" }, null);
+            Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+            using var denied = await Send(method, path, new { name = "Test" }, admin.AccessToken);
+            Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        }
+        foreach (var (method, path) in endpoints.Where(e => e.Path.StartsWith("/api/family-tree")))
+        {
+            using var removed = await Send(method, path.Replace("/api/family-tree", "/api/admin/family-tree"), new { }, admin.AccessToken);
+            Assert.Equal(HttpStatusCode.NotFound, removed.StatusCode);
+        }
+
+        var email = $"roles.{Guid.NewGuid():N}@gmail.com";
+        const string password = "User_Test!234567";
+        Assert.Equal(HttpStatusCode.Created, (await Post("/api/auth/register", new {
+            fullName = "Roles User", phoneNumber = "0912345678", gender = "Nam", dateOfBirth = "1995-05-20",
+            email, password, confirmPassword = password })).StatusCode);
+        var user = await Login(email, password);
+        Assert.Equal(HttpStatusCode.OK, (await Get("/api/family-tree", user.AccessToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Get("/api/family-tree/generations", user.AccessToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await Get("/api/library/categories", user.AccessToken)).StatusCode);
     }
 
     [Fact]
@@ -242,7 +287,7 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
             fullName = "Gamma", generation = 1, gender = "Nam", childIds = Array.Empty<int>(),
             horizontalRelations = new[] { new { memberId = b, relationType = "Sibling" }, new { memberId = b, relationType = "sibling" } }
         }, token)).StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden, (await Get("/api/admin/family-tree", token)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await Get("/api/admin/family-tree", token)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await Delete($"/api/family-tree/{c}", token)).StatusCode);
         Assert.Equal(JsonValueKind.Null, (await Body(await Get($"/api/family-tree/{a}", token))).GetProperty("data").GetProperty("spouseId").ValueKind);
     }

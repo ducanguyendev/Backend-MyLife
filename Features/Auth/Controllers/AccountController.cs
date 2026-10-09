@@ -14,6 +14,8 @@ using MyLife.Features.User.Models;
 using MyLife.Shared.Data;
 using MyLife.Shared.Entities;
 using MyLife.Shared.Security;
+using MyLife.Shared.Web;
+using Microsoft.AspNetCore.RateLimiting;
 using AppUser = MyLife.Shared.Entities.User;
 
 namespace MyLife.Features.Auth.Controllers;
@@ -32,13 +34,14 @@ public sealed class AccountController : ControllerBase
     public AccountController(AppDbContext db, ITokenService tokens, IGoogleCredentialVerifier googleCredentials, IGoogleAvatarSyncService googleAvatars, IConfiguration configuration, ILogger<AccountController> logger)
         => (_db, _tokens, _googleCredentials, _googleAvatars, _configuration, _logger) = (db, tokens, googleCredentials, googleAvatars, configuration, logger);
 
+    [EnableRateLimiting(WebRateLimits.Auth)]
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginViewModel model)
     {
         if (!ModelState.IsValid) return ValidationProblem(ModelState);
         var email = NormalizeEmail(model.Email);
         var user = await UserWithRoles().SingleOrDefaultAsync(x => x.Email == email);
-        if (user is null || !user.IsActive || !user.HasLocalProvider || !BCrypt.Net.BCrypt.Verify(model.Password, user.PasswordHash))
+        if (user is null || !user.IsActive || !user.HasLocalProvider || AppRoles.ExclusiveRole(user.UserRoles.Select(x => x.Role.Name)) is null || !BCrypt.Net.BCrypt.Verify(model.Password, user.PasswordHash))
         {
             await LogLoginAsync(user, email, "FAILED");
             await _db.SaveChangesAsync();
@@ -48,6 +51,7 @@ public sealed class AccountController : ControllerBase
         return Ok(await CreateSessionResponseAsync(user));
     }
 
+    [EnableRateLimiting(WebRateLimits.Auth)]
     [HttpPost("auth/register")]
     public async Task<IActionResult> Register([FromBody] RegisterViewModel model)
     {
@@ -72,6 +76,7 @@ public sealed class AccountController : ControllerBase
         return StatusCode(StatusCodes.Status201Created, new { success = true, message = "Registration completed.", email });
     }
 
+    [EnableRateLimiting(WebRateLimits.Auth)]
     [HttpPost("auth/google")]
     public async Task<IActionResult> GoogleLogin([FromBody] GoogleAuthRequest request)
     {
@@ -102,12 +107,13 @@ public sealed class AccountController : ControllerBase
                 user.UpdatedAt = DateTime.UtcNow;
             }
             if (!user.IsActive) { await LogLoginAsync(user, email, "FAILED"); await _db.SaveChangesAsync(); return Unauthorized(Error("This account is locked.")); }
+            if (AppRoles.ExclusiveRole(user.UserRoles.Select(x => x.Role.Name)) is null) return Unauthorized(Error("This account role is unavailable."));
             await _googleAvatars.SyncIfNeededAsync(user, identity.Picture, HttpContext.RequestAborted);
             await LogLoginAsync(user, email, "SUCCESS"); await _db.SaveChangesAsync();
             return Ok(await CreateSessionResponseAsync(user));
         }
         catch (InvalidJwtException) { return BadRequest(Error("The Google credential is invalid or expired.")); }
-        catch (HttpRequestException ex) { _logger.LogWarning(ex, "Google authentication is unavailable"); return StatusCode(503, Error("Google authentication is temporarily unavailable.")); }
+        catch (HttpRequestException ex) { _logger.LogWarning("Google authentication is unavailable ErrorType={ErrorType}", ex.GetType().Name); return StatusCode(503, Error("Google authentication is temporarily unavailable.")); }
     }
 
     [Authorize]
@@ -144,6 +150,7 @@ public sealed class AccountController : ControllerBase
         await _db.SaveChangesAsync(); return Ok(new { success = true, message = "Password updated." });
     }
 
+    [EnableRateLimiting(WebRateLimits.Refresh)]
     [HttpPost("refresh-token")]
     public async Task<IActionResult> RefreshToken([FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] RefreshTokenRequest? request)
     {
@@ -157,7 +164,7 @@ public sealed class AccountController : ControllerBase
             .SingleOrDefaultAsync(x => x.Token == HashRefreshToken(rawRefresh));
         if (stored is not null && !string.IsNullOrWhiteSpace(email) && !string.Equals(stored.User.Email, email, StringComparison.OrdinalIgnoreCase))
             stored = null;
-        if (stored is null || stored.IsRevoked || stored.ExpiresAt <= DateTime.UtcNow || !stored.User.IsActive)
+        if (stored is null || stored.IsRevoked || stored.ExpiresAt <= DateTime.UtcNow || !stored.User.IsActive || AppRoles.ExclusiveRole(stored.User.UserRoles.Select(x => x.Role.Name)) is null)
         {
             if (stored is not null) { stored.IsRevoked = true; await _db.SaveChangesAsync(); }
             await transaction.CommitAsync(); return Unauthorized(Error("Session has expired. Please sign in again."));
@@ -248,7 +255,19 @@ public sealed class AccountController : ControllerBase
     {
         var user = await UserWithRoles().SingleOrDefaultAsync(x => x.Id == id);
         if (user is null) return NotFound(Error("User not found.")); if (PrimaryRole(user) == AppRoles.Admin) return BadRequest(Error("Administrator accounts cannot be deleted."));
-        _db.Users.Remove(user); await _db.SaveChangesAsync(); return Ok(new { success = true, deletedId = id });
+        await using var transaction = await _db.Database.BeginTransactionAsync(HttpContext.RequestAborted);
+        await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT id FROM users WHERE id = {id} FOR UPDATE", HttpContext.RequestAborted);
+        var tree = (await _db.FamilyTrees.FromSqlInterpolated($"SELECT * FROM family_trees WHERE owner_user_id = {id} FOR UPDATE").ToListAsync(HttpContext.RequestAborted)).SingleOrDefault();
+        if (tree is not null)
+        {
+            if (await _db.FamilyMembers.AnyAsync(m => m.FamilyTreeId == tree.Id, HttpContext.RequestAborted))
+                return Conflict(new { success = false, code = "USER_HAS_FAMILY_MEMBERS", message = "Remove the user's family members before deleting the account." });
+            _db.FamilyTrees.Remove(tree);
+            await _db.SaveChangesAsync(HttpContext.RequestAborted);
+        }
+        _db.Users.Remove(user); await _db.SaveChangesAsync(HttpContext.RequestAborted);
+        await transaction.CommitAsync(HttpContext.RequestAborted);
+        return Ok(new { success = true, deletedId = id });
     }
 
     private async Task<object> CreateSessionResponseAsync(AppUser user) { var refresh = _tokens.GenerateRefreshToken(); _db.RefreshTokens.Add(NewRefreshToken(user.Id, refresh)); await _db.SaveChangesAsync(); return CreateSessionResponse(user, refresh); }
@@ -271,7 +290,7 @@ public sealed class AccountController : ControllerBase
     private static string HashRefreshToken(string raw) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)));
     private static object Error(string message) => new { success = false, message };
     private int AccessSeconds => _configuration.GetValue<int>("JwtSettings:AccessTokenSeconds"); private int RefreshMinutes => _configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes");
-    private object ToUserDto(AppUser user) => new { id = user.Id, email = user.Email, fullName = user.FullName, name = string.IsNullOrWhiteSpace(user.FullName) ? user.Email.Split('@')[0] : user.FullName, phoneNumber = user.PhoneNumber, gender = user.Gender, dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"), avatarUrl = user.AvatarUrl, role = PrimaryRole(user), authProvider = user.AuthProvider, authProviderName = user.AuthProvider == 1 ? "GOOGLE" : "LOCAL", loginProviders = new { local = user.HasLocalProvider, google = user.HasGoogleProvider }, isActive = user.IsActive, verifiedAt = user.VerifiedAt, createdAt = user.CreatedAt, updatedAt = user.UpdatedAt };
+    private object ToUserDto(AppUser user) => new { id = user.Id, email = user.Email, fullName = user.FullName, name = string.IsNullOrWhiteSpace(user.FullName) ? user.Email.Split('@')[0] : user.FullName, phoneNumber = user.PhoneNumber, gender = user.Gender, dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"), avatarUrl = user.AvatarUrl, role = PrimaryRole(user), roles = new[] { PrimaryRole(user) }, authProvider = user.AuthProvider, authProviderName = user.AuthProvider == 1 ? "GOOGLE" : "LOCAL", loginProviders = new { local = user.HasLocalProvider, google = user.HasGoogleProvider }, isActive = user.IsActive, verifiedAt = user.VerifiedAt, createdAt = user.CreatedAt, updatedAt = user.UpdatedAt };
     private void SetAuthCookies(string access, string refresh)
     {
         Response.Cookies.Append("AccessToken", access, CookieOptions(DateTimeOffset.UtcNow.AddSeconds(AccessSeconds)));

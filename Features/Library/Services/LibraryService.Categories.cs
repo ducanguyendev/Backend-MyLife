@@ -48,6 +48,25 @@ public sealed partial class LibraryService
         return new(category.Id, category.Name, category.Slug, category.IsDefault);
     }
 
+    public async Task<LibraryCategoryDto> UpdateCategoryAsync(int userId, long categoryId, UpdateLibraryCategoryDto dto, CancellationToken ct)
+    {
+        var name = dto.Name?.Trim() ?? string.Empty;
+        if (name.Length is < 1 or > 100)
+            throw new LibraryOperationException(400, "Category name is required (max 100 characters).", code: "LIBRARY_CATEGORY_INVALID");
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
+        await LockCategoryRegistryAsync(userId, ct);
+        var category = await db.LibraryCategories.SingleOrDefaultAsync(c => c.Id == categoryId && c.CreatedByUserId == userId, ct)
+            ?? throw new LibraryOperationException(404, "Library category not found.", code: "LIBRARY_CATEGORY_NOT_FOUND");
+        if (category.IsDefault)
+            throw new LibraryOperationException(409, "Default categories cannot be edited.", code: "LIBRARY_CATEGORY_CANNOT_EDIT");
+        // Photos reference Slug. Renaming never changes the slug or photo rows.
+        category.Name = name;
+        category.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
+        return new(category.Id, category.Name, category.Slug, category.IsDefault);
+    }
+
     public async Task DeleteCategoryAsync(int userId, long categoryId, CancellationToken ct)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(ct);

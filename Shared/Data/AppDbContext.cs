@@ -17,6 +17,7 @@ namespace MyLife.Shared.Data
         public DbSet<UserRole> UserRoles => Set<UserRole>();
         public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
         public DbSet<LoginLog> LoginLogs => Set<LoginLog>();
+        public DbSet<FamilyTree> FamilyTrees => Set<FamilyTree>();
         public DbSet<FamilyMember> FamilyMembers => Set<FamilyMember>();
         public DbSet<FamilyRelationship> FamilyRelationships => Set<FamilyRelationship>();
         public DbSet<Generation> Generations => Set<Generation>();
@@ -188,12 +189,27 @@ namespace MyLife.Shared.Data
                     .OnDelete(DeleteBehavior.SetNull);
             });
 
+            modelBuilder.Entity<FamilyTree>(entity =>
+            {
+                entity.ToTable("family_trees");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedOnAdd();
+                entity.Property(e => e.OwnerUserId).HasColumnName("owner_user_id");
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+                entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+                entity.HasIndex(e => e.OwnerUserId).IsUnique();
+                entity.HasOne(e => e.OwnerUser).WithMany().HasForeignKey(e => e.OwnerUserId).OnDelete(DeleteBehavior.Restrict);
+            });
+
             // 6. Table FAMILY_MEMBERS
             modelBuilder.Entity<FamilyMember>(entity =>
             {
                 entity.ToTable("family_members");
                 entity.HasKey(e => e.Id);
                 entity.Property(e => e.Id).HasColumnName("id");
+                entity.HasOne(e => e.FamilyTree).WithMany(e => e.Members).HasForeignKey(e => e.FamilyTreeId).OnDelete(DeleteBehavior.Restrict);
+                entity.HasIndex(e => e.FamilyTreeId);
+                entity.HasIndex(e => new { e.FamilyTreeId, e.Generation });
                 
                 entity.HasOne(e => e.Father)
                     .WithMany(e => e.ChildrenAsFather)

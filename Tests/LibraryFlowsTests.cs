@@ -54,12 +54,50 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         using var defaultDelete = await Send(owner.Token, HttpMethod.Delete, $"/api/library/categories/{defaults[0].GetProperty("id").GetInt64()}");
         Assert.Equal(HttpStatusCode.Conflict, defaultDelete.StatusCode);
         Assert.Equal("LIBRARY_CATEGORY_CANNOT_DELETE", (await defaultDelete.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        foreach (var name in new string?[] { null, "", "   ", new string('a', 101) }) {
+            using var invalid = await Send(owner.Token, HttpMethod.Put, $"/api/library/categories/{id}", new { name });
+            Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+            Assert.Equal("LIBRARY_CATEGORY_INVALID", (await invalid.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        }
+        using var foreignEdit = await Send(other.Token, HttpMethod.Put, $"/api/library/categories/{id}", new { name = "Foreign rename" });
+        Assert.Equal(HttpStatusCode.NotFound, foreignEdit.StatusCode);
+        Assert.Equal("LIBRARY_CATEGORY_NOT_FOUND", (await foreignEdit.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        foreach (var item in defaults.EnumerateArray()) {
+            using var defaultEdit = await Send(owner.Token, HttpMethod.Put, $"/api/library/categories/{item.GetProperty("id").GetInt64()}", new { name = "Default rename" });
+            Assert.Equal(HttpStatusCode.Conflict, defaultEdit.StatusCode);
+            Assert.Equal("LIBRARY_CATEGORY_CANNOT_EDIT", (await defaultEdit.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        }
         var albumId = (await Create(owner.Token)).GetProperty("id").GetInt64();
         var metadata = new LibraryPhotoMetadataDto { Category = "du-lich" };
         using var uploaded = await Upload(owner.Token, albumId, [("a.jpg", "image/jpeg", Jpeg)], metadata);
         Assert.Equal(HttpStatusCode.Created, uploaded.StatusCode);
         var photo = (await uploaded.Content.ReadFromJsonAsync<JsonElement>())[0];
         Assert.False(string.IsNullOrEmpty(photo.GetProperty("driveFileId").GetString()));
+        using var photoBeforeRename = await Send(owner.Token, HttpMethod.Get, $"/api/library/albums/{albumId}");
+        var persistedPhoto = (await photoBeforeRename.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("photos")[0];
+        var uploadCountBeforeRename = storage.UploadCount;
+        var deleteCountBeforeRename = storage.DeletePhotoCalls.Count;
+        LibraryCategory before;
+        await using (var scope = factory.Services.CreateAsyncScope())
+            before = await scope.ServiceProvider.GetRequiredService<AppDbContext>().LibraryCategories.AsNoTracking().SingleAsync(c => c.Id == id);
+        using var rename = await Send(owner.Token, HttpMethod.Put, $"/api/library/categories/{id}", new {
+            name = " Du lịch gia đình ", slug = "injected", isDefault = true, createdByUserId = other.Id, id = -1 });
+        Assert.Equal(HttpStatusCode.OK, rename.StatusCode);
+        var renamed = await rename.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("Du lịch gia đình", renamed.GetProperty("name").GetString());
+        Assert.Equal("du-lich", renamed.GetProperty("slug").GetString());
+        Assert.Equal(id, renamed.GetProperty("id").GetInt64());
+        Assert.False(renamed.GetProperty("isDefault").GetBoolean());
+        var reloaded = (await Categories(owner.Token)).EnumerateArray().Single(c => c.GetProperty("id").GetInt64() == id);
+        Assert.Equal(renamed.ToString(), reloaded.ToString());
+        using var photoReload = await Send(owner.Token, HttpMethod.Get, $"/api/library/albums/{albumId}");
+        Assert.Equal(persistedPhoto.ToString(), (await photoReload.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("photos")[0].ToString());
+        Assert.Equal(uploadCountBeforeRename, storage.UploadCount); Assert.Equal(deleteCountBeforeRename, storage.DeletePhotoCalls.Count);
+        await using (var scope = factory.Services.CreateAsyncScope()) {
+            var after = await scope.ServiceProvider.GetRequiredService<AppDbContext>().LibraryCategories.AsNoTracking().SingleAsync(c => c.Id == id);
+            Assert.Equal(before.CreatedAt, after.CreatedAt); Assert.Equal(before.CreatedByUserId, after.CreatedByUserId);
+            Assert.Equal(before.Slug, after.Slug); Assert.True(after.UpdatedAt > before.UpdatedAt);
+        }
         using var inUse = await Send(owner.Token, HttpMethod.Delete, $"/api/library/categories/{id}");
         Assert.Equal(HttpStatusCode.Conflict, inUse.StatusCode);
         Assert.Equal("LIBRARY_CATEGORY_IN_USE", (await inUse.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());

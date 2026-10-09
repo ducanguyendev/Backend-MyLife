@@ -8,27 +8,33 @@ namespace MyLife.Features.FamilyTree.Controllers;
 
 [ApiController]
 [Route("api/family-tree")]
-[Authorize]
-public sealed class FamilyTreeController(IFamilyTreeService service) : FamilyTreeControllerBase(service);
-
-[ApiController]
-[Route("api/admin/family-tree")]
-[Authorize(Roles = AppRoles.Admin)]
-public sealed class AdminFamilyTreeController(IFamilyTreeService service) : FamilyTreeControllerBase(service);
-
-// Preserve both route families without applying a weaker policy to the admin alias.
-public abstract class FamilyTreeControllerBase(IFamilyTreeService service) : ControllerBase
+[Authorize(Roles = AppRoles.User)]
+public sealed class FamilyTreeController(IFamilyTreeService service, ICurrentUserService currentUser) : ControllerBase
 {
-    [HttpGet] public async Task<IActionResult> GetAll() => Ok(new { success = true, data = await service.GetAllMembersAsync() });
-    [HttpGet("generations")] public async Task<IActionResult> Generations() => Ok(new { success = true, data = await service.GetAllGenerationsAsync() });
-    [HttpGet("{id:int}")] public async Task<IActionResult> Get(int id) { var member = await service.GetMemberByIdAsync(id); return member is null ? NotFound(Error("Family member not found.")) : Ok(new { success = true, data = member }); }
-    [HttpPost] public async Task<IActionResult> Create(CreateFamilyMemberDto dto) => await Run(() => service.CreateMemberAsync(dto), created: true);
-    [HttpPut("{id:int}")] public async Task<IActionResult> Update(int id, UpdateFamilyMemberDto dto) => await Run(() => service.UpdateMemberAsync(id, dto));
-    [HttpDelete("{id:int}")] public async Task<IActionResult> Delete(int id) { var deleted = await service.DeleteMemberAsync(id); return deleted ? Ok(new { success = true, message = "Family member deleted." }) : NotFound(Error("Family member not found.")); }
-    private async Task<IActionResult> Run<T>(Func<Task<T>> operation, bool created = false)
+    [HttpGet]
+    public Task<IActionResult> GetAll() => Run(async (userId, ct) => Ok(new { success = true, data = await service.GetAllMembersAsync(userId, ct) }));
+    [HttpGet("generations")]
+    public Task<IActionResult> Generations() => Run(async (_, ct) => Ok(new { success = true, data = await service.GetAllGenerationsAsync(ct) }));
+    [HttpGet("{id:int}")]
+    public Task<IActionResult> Get(int id) => Run(async (userId, ct) =>
     {
-        if (!ModelState.IsValid) return ValidationProblem(ModelState);
-        try { var value = await operation(); return created ? StatusCode(201, new { success = true, data = value }) : Ok(new { success = true, data = value }); }
+        var member = await service.GetMemberByIdAsync(userId, id, ct);
+        return member is null ? NotFound(Error("Family member not found.")) : Ok(new { success = true, data = member });
+    });
+    [HttpPost]
+    public Task<IActionResult> Create(CreateFamilyMemberDto dto) => Run(async (userId, ct) => StatusCode(201, new { success = true, data = await service.CreateMemberAsync(userId, dto, ct) }));
+    [HttpPut("{id:int}")]
+    public Task<IActionResult> Update(int id, UpdateFamilyMemberDto dto) => Run(async (userId, ct) => Ok(new { success = true, data = await service.UpdateMemberAsync(userId, id, dto, ct) }));
+    [HttpDelete("{id:int}")]
+    public Task<IActionResult> Delete(int id) => Run(async (userId, ct) => await service.DeleteMemberAsync(userId, id, ct)
+        ? Ok(new { success = true, message = "Family member deleted." }) : NotFound(Error("Family member not found.")));
+
+    private async Task<IActionResult> Run(Func<int, CancellationToken, Task<IActionResult>> operation)
+    {
+        var ct = HttpContext.RequestAborted;
+        var userId = await currentUser.GetUserIdAsync(ct);
+        if (userId is null) return Unauthorized(Error("The session is invalid.", "AUTH_SESSION_INVALID"));
+        try { return await operation(userId.Value, ct); }
         catch (KeyNotFoundException) { return NotFound(Error("Family member not found.")); }
         catch (ArgumentException ex) { return BadRequest(Error(ex.Message, ex is FamilyTreeValidationException validation ? validation.Code : "FAMILY_VALIDATION_FAILED")); }
     }

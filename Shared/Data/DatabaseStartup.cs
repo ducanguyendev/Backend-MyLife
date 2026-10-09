@@ -6,6 +6,14 @@ namespace MyLife.Shared.Data;
 
 public static class DatabaseStartup
 {
+    public static async Task InitializeAsync(AppDbContext db, IConfiguration configuration, bool isDevelopment, CancellationToken ct = default)
+    {
+        if (configuration.GetValue<bool?>("Database:AutoMigrate") ?? isDevelopment)
+            await MigrateAndSeedAsync(db, configuration, ct);
+        else if ((await db.Database.GetPendingMigrationsAsync(ct)).Any())
+            throw new InvalidOperationException("Pending database migrations. Apply the reviewed migration before rollout; startup did not change the schema.");
+    }
+
     public static async Task MigrateAndSeedAsync(AppDbContext db, IConfiguration configuration, CancellationToken cancellationToken = default)
     {
         await BaselineLegacySchemaAsync(db, configuration, cancellationToken);
@@ -33,10 +41,10 @@ public static class DatabaseStartup
             if (columns.Keys.Any(x => x.Table == "__EFMigrationsHistory")) return;
             // New Library tables are created by their migration, not expected
             // in the pre-migration legacy baseline.
-            if (columns.Keys.Any(x => x.Table is "library_albums" or "library_photos" or "library_categories"))
+            if (columns.Keys.Any(x => x.Table is "library_albums" or "library_photos" or "library_categories" or "family_trees"))
                 throw new InvalidOperationException("Library tables exist without migration history; review the legacy schema manually.");
             var entities = db.Model.GetEntityTypes()
-                .Where(e => e.GetTableName() is not ("library_albums" or "library_photos" or "library_categories")).ToList();
+                .Where(e => e.GetTableName() is not ("library_albums" or "library_photos" or "library_categories" or "family_trees")).ToList();
             if (!entities.Any(e => columns.Keys.Any(x => x.Table == e.GetTableName()))) return;
             if (!configuration.GetValue<bool>("Database:AllowLegacyBaseline"))
                 throw new InvalidOperationException("A legacy database without migration history was detected. Back up the database and explicitly enable Database:AllowLegacyBaseline for this upgrade.");
@@ -47,6 +55,7 @@ public static class DatabaseStartup
                 var store = StoreObjectIdentifier.Table(table, entity.GetSchema());
                 foreach (var property in entity.GetProperties())
                 {
+                    if (table == "family_members" && property.Name == "FamilyTreeId") continue;
                     var column = property.GetColumnName(store)!;
                     if (table == "users" && column is "google_subject" or "has_local_provider" or "has_google_provider" or
                         "avatar_drive_file_id" or "avatar_source" or "google_avatar_source_url")
@@ -87,7 +96,7 @@ public static class DatabaseStartup
             await using (var reader = await command.ExecuteReaderAsync(ct))
                 while (await reader.ReadAsync(ct)) foreignKeys.Add((reader.GetString(0), reader.GetString(1)));
             foreach (var entity in entities)
-                foreach (var key in entity.GetForeignKeys())
+                foreach (var key in entity.GetForeignKeys().Where(k => !k.Properties.Any(p => p.Name == "FamilyTreeId")))
                     if (!foreignKeys.Contains((entity.GetTableName()!, key.GetConstraintName()!)))
                         throw new InvalidOperationException("Legacy schema is missing a required foreign key. No migration history was changed.");
 

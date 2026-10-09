@@ -10,13 +10,16 @@ using MyLife.Features.Avatar.Services;
 using MyLife.Features.FamilyTree.Services;
 using MyLife.Features.Library.Services;
 using MyLife.Shared.Security;
+using MyLife.Shared.Web;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.ResponseCompression;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Cấu hình định dạng Log Console kèm Timestamp [HH:mm:ss]
 builder.Logging.AddSimpleConsole(options =>
 {
-    options.IncludeScopes = false;
+    options.IncludeScopes = true;
     options.SingleLine = true;
     options.TimestampFormat = "[HH:mm:ss] ";
 });
@@ -49,6 +52,12 @@ builder.Services.AddScoped<IGoogleDriveMemberAvatarService, GoogleDriveMemberAva
 builder.Services.AddHttpClient(nameof(GoogleDriveLibraryStorageService), client => client.Timeout = TimeSpan.FromSeconds(45));
 builder.Services.AddScoped<ILibraryStorageService, GoogleDriveLibraryStorageService>();
 builder.Services.AddScoped<ILibraryService, LibraryService>();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
+
+builder.Services.AddWebRateLimits(builder.Configuration);
+builder.Services.AddHealthChecks().AddCheck<DatabaseHealthCheck>("postgres", tags: ["ready"]);
+builder.Services.AddResponseCompression(options => { options.EnableForHttps = true; options.Providers.Add<BrotliCompressionProvider>(); options.Providers.Add<GzipCompressionProvider>(); });
 
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
     ?? (builder.Environment.IsDevelopment() ? ["http://localhost:7000"] : []);
@@ -63,7 +72,8 @@ builder.Services.AddCors(options =>
         policy.WithOrigins(allowedOrigins)
               .AllowAnyHeader()
               .AllowAnyMethod()
-              .AllowCredentials();
+              .AllowCredentials()
+              .WithExposedHeaders("X-Request-ID", "Retry-After");
     });
 });
 
@@ -145,19 +155,22 @@ builder.Services.AddAuthentication(options =>
         {
             var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
             var email = context.Principal?.FindFirstValue(ClaimTypes.Email);
-            var user = await db.Users.AsNoTracking().Include(x => x.UserRoles).ThenInclude(x => x.Role)
-                .SingleOrDefaultAsync(x => x.Email == email);
+            var user = await db.Users.AsNoTracking().Where(x => x.Email == email)
+                .Select(x => new { x.Id, x.IsActive, Roles = x.UserRoles.Select(r => r.Role.Name).ToArray() })
+                .SingleOrDefaultAsync(context.HttpContext.RequestAborted);
             if (user is null || !user.IsActive)
             {
                 context.Fail("This account is unavailable.");
                 return;
             }
+            var role = AppRoles.ExclusiveRole(user.Roles);
+            if (role is null) { context.Fail("This account role is unavailable."); return; }
+            context.HttpContext.Items[CurrentUserService.VerifiedUserIdKey] = user.Id;
             // Enforce current DB roles, including demotions, even before an old access token expires.
             if (context.Principal?.Identity is ClaimsIdentity identity)
             {
                 foreach (var claim in identity.FindAll(identity.RoleClaimType).ToList()) identity.RemoveClaim(claim);
-                foreach (var role in user.UserRoles.Select(x => x.Role.Name).Where(x => x is AppRoles.Admin or AppRoles.User).Distinct())
-                    identity.AddClaim(new Claim(identity.RoleClaimType, role));
+                identity.AddClaim(new Claim(identity.RoleClaimType, role));
             }
         },
         OnChallenge = async context =>
@@ -176,13 +189,17 @@ builder.Services.AddAuthentication(options =>
 
 var app = builder.Build();
 
+app.UseMiddleware<RequestContextMiddleware>();
+// Compress data responses, excluding token-issuing auth responses and image bytes.
+app.UseWhen(http => http.Request.Path.StartsWithSegments("/api/family-tree") || http.Request.Path.StartsWithSegments("/api/library") || http.Request.Path.StartsWithSegments("/health"), branch => branch.UseResponseCompression());
+
 app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
 {
     var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("UnhandledException");
     var exception = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
-    logger.LogError(exception, "Unhandled exception for {Method} {Path}", context.Request.Method, context.Request.Path);
-    var databaseConflict = exception is Npgsql.PostgresException { SqlState: "40001" or "40P01" or "23505" }
-        || exception is DbUpdateException { InnerException: Npgsql.PostgresException { SqlState: "40001" or "40P01" or "23505" } };
+    logger.LogError("Unhandled exception ErrorType={ErrorType} Method={Method} Path={Path}", exception?.GetType().Name, context.Request.Method, context.Request.Path);
+    var databaseConflict = exception is Npgsql.PostgresException { SqlState: "40001" or "40P01" or "23505" or "23503" or "23001" }
+        || exception is DbUpdateException { InnerException: Npgsql.PostgresException { SqlState: "40001" or "40P01" or "23505" or "23503" or "23001" } };
     context.Response.StatusCode = databaseConflict ? StatusCodes.Status409Conflict : StatusCodes.Status500InternalServerError;
     await context.Response.WriteAsJsonAsync(new { success = false, message = databaseConflict ? "The request conflicted with another change. Please retry." : "An unexpected server error occurred." });
 }));
@@ -191,8 +208,8 @@ app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await DatabaseStartup.MigrateAndSeedAsync(db, app.Configuration);
-    app.Logger.LogInformation("Database migrations and seed completed.");
+    await DatabaseStartup.InitializeAsync(db, app.Configuration, app.Environment.IsDevelopment());
+    app.Logger.LogInformation("Database startup validation completed.");
 }
 
 if (app.Environment.IsDevelopment())
@@ -232,8 +249,15 @@ app.Use(async (context, nextMiddleware) =>
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapControllers();
+var healthOptions = new HealthCheckOptions
+{
+    ResponseWriter = (http, report) => http.Response.WriteAsJsonAsync(new { status = report.Status.ToString() })
+};
+app.MapHealthChecks("/health/ready", healthOptions);
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false, ResponseWriter = healthOptions.ResponseWriter });
 
 app.Run();
 

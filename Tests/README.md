@@ -71,3 +71,22 @@ This reads `GoogleDrive:WebAppUrl` from appsettings.json, or the
 from `Tests/fixtures/avatar-replacements.json` (JPEG → WebP → PNG → WebP → JPEG),
 checks every response's ID/MIME/checksum, downloads original Drive media after
 each overwrite and verifies its checksum. No URL, base64 or secrets are logged.
+
+## User-only FamilyTree / category rename regressions
+
+`SystemFlowsTests.Family_tree_and_library_require_actual_user_role_and_retire_admin_alias`
+checks all main member/generation/album/photo/category endpoints for anonymous
+401 and ADMIN-only 403, retired admin alias 404, and USER access. Every fixture
+account has exactly one supported role; there are no combined-role accounts. `LibraryFlowsTests.Categories_are_owned_idempotent_dynamic_and_protect_default_or_used_slugs`
+adds category PUT validation, default/foreign denial and rename while in use,
+checking persisted photos and storage calls stay unchanged.
+
+When the Windows test runner cannot write Event Log, set
+`$env:Logging__EventLog__LogLevel__Default = 'None'` for the test process.
+Keep `MYLIFE_TEST_DATABASE` pointed to disposable PostgreSQL as above.
+
+## Private trees and production runtime
+
+FamilyIsolationTests cover two-user isolation, same names, bilateral direct-ID attacks, all foreign relationship inputs, cleanup isolation and twelve concurrent first requests. FamilyTreeMigrationTests use a unique tree_migration_* schema: previous migration, four single-role accounts/no members, Up/Down, NOT NULL/no default, unique owner, restrictive FKs, indexes and unchanged Library schema. WebRuntimeTests exercise low test-only rate limits, IP/user partitions, Retry-After, live/ready including unavailable PostgreSQL, request IDs and actual gzip decompression.
+
+These tests never connect to the application database. The global test factory increases rate permits for unrelated existing tests; dedicated runtime tests override policies to deterministic small limits without minute-long sleeps. Production initialization with pending migrations fails without applying them.

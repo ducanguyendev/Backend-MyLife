@@ -38,7 +38,7 @@ public sealed class GoogleAvatarSyncService(
 
         if (!TryCreateAllowedGoogleUri(googlePictureUrl, out var pictureUri))
         {
-            logger.LogWarning("Rejected Google profile image URL for {Email}", user.Email);
+            logger.LogWarning("Rejected Google profile image URL for {UserId}", user.Id);
             return false;
         }
 
@@ -49,19 +49,19 @@ public sealed class GoogleAvatarSyncService(
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                logger.LogWarning("Google avatar download returned HTTP {StatusCode} for {Email}", (int)response.StatusCode, user.Email);
+                logger.LogWarning("Google avatar download returned HTTP {StatusCode} for {UserId}", (int)response.StatusCode, user.Id);
                 return false;
             }
 
             var contentType = response.Content.Headers.ContentType?.MediaType;
             if (string.IsNullOrWhiteSpace(contentType) || !AllowedContentTypes.Contains(contentType))
             {
-                logger.LogWarning("Google avatar returned an unsupported content type for {Email}", user.Email);
+                logger.LogWarning("Google avatar returned an unsupported content type for {UserId}", user.Id);
                 return false;
             }
             if (response.Content.Headers.ContentLength is > MaximumAvatarBytes)
             {
-                logger.LogWarning("Google avatar exceeded the download limit for {Email}", user.Email);
+                logger.LogWarning("Google avatar exceeded the download limit for {UserId}", user.Id);
                 return false;
             }
 
@@ -69,7 +69,7 @@ public sealed class GoogleAvatarSyncService(
             var bytes = await ReadWithLimitAsync(stream, MaximumAvatarBytes, cancellationToken);
             if (bytes is null)
             {
-                logger.LogWarning("Google avatar exceeded the streaming limit for {Email}", user.Email);
+                logger.LogWarning("Google avatar exceeded the streaming limit for {UserId}", user.Id);
                 return false;
             }
 
@@ -77,7 +77,7 @@ public sealed class GoogleAvatarSyncService(
                 user.Email, bytes, contentType, user.AvatarDriveFileId, cancellationToken);
             if (!stored.Success || string.IsNullOrWhiteSpace(stored.FileId))
             {
-                logger.LogWarning("Google avatar storage failed for {Email}", user.Email);
+                logger.LogWarning("Google avatar storage failed for {UserId}", user.Id);
                 return false;
             }
 
@@ -91,7 +91,7 @@ public sealed class GoogleAvatarSyncService(
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
         {
             // Avatar mirroring is best effort and must never turn a valid Google login into a failure.
-            logger.LogWarning(ex, "Could not mirror Google avatar for {Email}", user.Email);
+            logger.LogWarning("Could not mirror Google avatar UserId={UserId} ErrorType={ErrorType}", user.Id, ex.GetType().Name);
             return false;
         }
     }
