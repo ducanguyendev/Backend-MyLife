@@ -22,9 +22,20 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
     private static readonly byte[] Webp = Fixture(1);
 
     [Fact]
-    public async Task Categories_are_owned_idempotent_dynamic_and_protect_default_or_used_slugs()
+    public async Task Categories_are_user_created_owned_dynamic_and_legacy_photos_do_not_need_registry_rows()
     {
         var owner = await User(); var other = await User();
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var now = DateTime.UtcNow;
+            db.LibraryCategories.AddRange(
+                new LibraryCategory { CreatedByUserId = owner.Id, Name = "Historical Photos", Slug = "photos", IsDefault = true, CreatedAt = now, UpdatedAt = now },
+                new LibraryCategory { CreatedByUserId = owner.Id, Name = "Decrees", Slug = "decrees", IsDefault = true, CreatedAt = now, UpdatedAt = now },
+                new LibraryCategory { CreatedByUserId = owner.Id, Name = "Gatherings", Slug = "events", IsDefault = true, CreatedAt = now, UpdatedAt = now },
+                new LibraryCategory { CreatedByUserId = owner.Id, Name = "Temple", Slug = "temple", IsDefault = true, CreatedAt = now, UpdatedAt = now });
+            await db.SaveChangesAsync();
+        }
         async Task<JsonElement> Categories(string token) {
             using var response = await Send(token, HttpMethod.Get, "/api/library/categories");
             Assert.Equal(HttpStatusCode.OK, response.StatusCode); return await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -33,15 +44,45 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
             using var response = await Send(token, HttpMethod.Post, "/api/library/categories", new { name, slug = "injected", isDefault = true, createdByUserId = other.Id });
             Assert.Equal(HttpStatusCode.Created, response.StatusCode); return await response.Content.ReadFromJsonAsync<JsonElement>();
         }
-        var defaults = await Categories(owner.Token); var retry = await Categories(owner.Token);
-        Assert.Equal(4, defaults.GetArrayLength()); Assert.Equal(defaults.ToString(), retry.ToString());
-        Assert.All(defaults.EnumerateArray(), item => Assert.True(item.GetProperty("isDefault").GetBoolean()));
-        Assert.Equal(4, (await Categories(other.Token)).GetArrayLength());
+        Assert.Empty((await Categories(owner.Token)).EnumerateArray());
+        Assert.Empty((await Categories(owner.Token)).EnumerateArray());
+        Assert.Empty((await Categories(other.Token)).EnumerateArray());
+        List<long> legacyDefaults;
+        await using (var scope = factory.Services.CreateAsyncScope())
+            legacyDefaults = await scope.ServiceProvider.GetRequiredService<AppDbContext>()
+                .LibraryCategories.AsNoTracking().Where(c => c.CreatedByUserId == owner.Id && c.IsDefault).Select(c => c.Id).ToListAsync();
+        Assert.Equal(4, legacyDefaults.Count);
+
+        var emptyCategoryAlbum = (await Create(owner.Token, "Zero categories")).GetProperty("id").GetInt64();
+        var storageUploadsBeforeEmptyCategory = storage.UploadCount;
+        using (var blockedUpload = await Upload(owner.Token, emptyCategoryAlbum, [("blocked.jpg", "image/jpeg", Jpeg)],
+            new LibraryPhotoMetadataDto { Category = string.Empty }))
+            Assert.Equal(HttpStatusCode.BadRequest, blockedUpload.StatusCode);
+        Assert.Equal(storageUploadsBeforeEmptyCategory, storage.UploadCount);
+
+        var animation = await Category("Hoạt hình", owner.Token);
+        Assert.Equal("hoat-hinh", animation.GetProperty("slug").GetString());
+        Assert.False(animation.GetProperty("isDefault").GetBoolean());
+        using (var reservedCategory = await Send(owner.Token, HttpMethod.Post, "/api/library/categories", new { name = "all" }))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, reservedCategory.StatusCode);
+            Assert.Equal("LIBRARY_CATEGORY_INVALID", (await reservedCategory.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        }
+        var animationAlbumId = (await Create(owner.Token, "Animation")).GetProperty("id").GetInt64();
+        using (var animationUpload = await Upload(owner.Token, animationAlbumId, [("doraemon.jpg", "image/jpeg", Jpeg)],
+            new LibraryPhotoMetadataDto { Category = animation.GetProperty("slug").GetString()! }))
+        {
+            Assert.Equal(HttpStatusCode.Created, animationUpload.StatusCode);
+            Assert.Equal("hoat-hinh", (await animationUpload.Content.ReadFromJsonAsync<JsonElement>())[0].GetProperty("category").GetString());
+        }
         var custom = await Category(" Du lịch ", owner.Token);
         Assert.Equal("Du lịch", custom.GetProperty("name").GetString()); Assert.Equal("du-lich", custom.GetProperty("slug").GetString());
         Assert.False(custom.GetProperty("isDefault").GetBoolean());
+        var initialUserCategories = await Categories(owner.Token);
+        Assert.Equal(new[] { "hoat-hinh", "du-lich" }, initialUserCategories.EnumerateArray().Select(item => item.GetProperty("slug").GetString()).ToArray());
         Assert.Equal("du-lich-2", (await Category("Du lich", owner.Token)).GetProperty("slug").GetString());
-        Assert.Equal("dam-gio", (await Category("Đám giỗ", owner.Token)).GetProperty("slug").GetString());
+        var memorial = await Category("Đám giỗ", owner.Token);
+        Assert.Equal("dam-gio", memorial.GetProperty("slug").GetString());
         foreach (var name in new[] { "", "   ", new string('a', 101) }) {
             using var invalid = await Send(owner.Token, HttpMethod.Post, "/api/library/categories", new { name });
             Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
@@ -51,9 +92,15 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         using var denied = await Send(other.Token, HttpMethod.Delete, $"/api/library/categories/{id}");
         Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
         Assert.Equal("LIBRARY_CATEGORY_NOT_FOUND", (await denied.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
-        using var defaultDelete = await Send(owner.Token, HttpMethod.Delete, $"/api/library/categories/{defaults[0].GetProperty("id").GetInt64()}");
-        Assert.Equal(HttpStatusCode.Conflict, defaultDelete.StatusCode);
-        Assert.Equal("LIBRARY_CATEGORY_CANNOT_DELETE", (await defaultDelete.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        foreach (var legacyId in legacyDefaults)
+        {
+            using var defaultDelete = await Send(owner.Token, HttpMethod.Delete, $"/api/library/categories/{legacyId}");
+            Assert.Equal(HttpStatusCode.Conflict, defaultDelete.StatusCode);
+            Assert.Equal("LIBRARY_CATEGORY_CANNOT_DELETE", (await defaultDelete.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+            using var defaultEdit = await Send(owner.Token, HttpMethod.Put, $"/api/library/categories/{legacyId}", new { name = "Default rename" });
+            Assert.Equal(HttpStatusCode.Conflict, defaultEdit.StatusCode);
+            Assert.Equal("LIBRARY_CATEGORY_CANNOT_EDIT", (await defaultEdit.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        }
         foreach (var name in new string?[] { null, "", "   ", new string('a', 101) }) {
             using var invalid = await Send(owner.Token, HttpMethod.Put, $"/api/library/categories/{id}", new { name });
             Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
@@ -62,11 +109,6 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         using var foreignEdit = await Send(other.Token, HttpMethod.Put, $"/api/library/categories/{id}", new { name = "Foreign rename" });
         Assert.Equal(HttpStatusCode.NotFound, foreignEdit.StatusCode);
         Assert.Equal("LIBRARY_CATEGORY_NOT_FOUND", (await foreignEdit.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
-        foreach (var item in defaults.EnumerateArray()) {
-            using var defaultEdit = await Send(owner.Token, HttpMethod.Put, $"/api/library/categories/{item.GetProperty("id").GetInt64()}", new { name = "Default rename" });
-            Assert.Equal(HttpStatusCode.Conflict, defaultEdit.StatusCode);
-            Assert.Equal("LIBRARY_CATEGORY_CANNOT_EDIT", (await defaultEdit.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
-        }
         var albumId = (await Create(owner.Token)).GetProperty("id").GetInt64();
         var metadata = new LibraryPhotoMetadataDto { Category = "du-lich" };
         using var uploaded = await Upload(owner.Token, albumId, [("a.jpg", "image/jpeg", Jpeg)], metadata);
@@ -101,32 +143,54 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         using var inUse = await Send(owner.Token, HttpMethod.Delete, $"/api/library/categories/{id}");
         Assert.Equal(HttpStatusCode.Conflict, inUse.StatusCode);
         Assert.Equal("LIBRARY_CATEGORY_IN_USE", (await inUse.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
-        using var edit = await Send(owner.Token, HttpMethod.Put, $"/api/library/photos/{photo.GetProperty("id").GetInt64()}", new { category = "dam-gio" });
+        using var edit = await Send(owner.Token, HttpMethod.Put, $"/api/library/photos/{photo.GetProperty("id").GetInt64()}", new { category = memorial.GetProperty("slug").GetString() });
         Assert.Equal(HttpStatusCode.OK, edit.StatusCode);
         using var remove = await Send(owner.Token, HttpMethod.Delete, $"/api/library/categories/{id}");
         Assert.Equal(HttpStatusCode.NoContent, remove.StatusCode);
+        var photoId = photo.GetProperty("id").GetInt64();
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var stored = await db.LibraryPhotos.SingleAsync(p => p.Id == photoId);
+            stored.Category = "photos";
+            await db.SaveChangesAsync();
+        }
+        using (var legacyRead = await Send(owner.Token, HttpMethod.Get, $"/api/library/albums/{albumId}"))
+        {
+            Assert.Equal(HttpStatusCode.OK, legacyRead.StatusCode);
+            var legacyPhoto = (await legacyRead.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("photos")[0];
+            Assert.Equal("photos", legacyPhoto.GetProperty("category").GetString());
+            Assert.Equal(photo.GetProperty("driveFileId").GetString(), legacyPhoto.GetProperty("driveFileId").GetString());
+        }
         var onlyOther = await Category("Chỉ của user khác", other.Token);
-        foreach (var slug in new[] { "unknown", "all", onlyOther.GetProperty("slug").GetString()! }) {
+        foreach (var slug in new[] { "unknown", "all", "photos", "decrees", "events", "temple", onlyOther.GetProperty("slug").GetString()! }) {
             using var invalid = await Upload(owner.Token, albumId, [("a.jpg", "image/jpeg", Jpeg)], new LibraryPhotoMetadataDto { Category = slug });
             Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
             using var invalidEdit = await Send(owner.Token, HttpMethod.Put, $"/api/library/photos/{photo.GetProperty("id").GetInt64()}", new { category = slug });
             Assert.Equal(HttpStatusCode.BadRequest, invalidEdit.StatusCode);
         }
+        using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            Assert.Equal(4, await db.LibraryCategories.CountAsync(c => c.CreatedByUserId == owner.Id && c.IsDefault));
+            Assert.Equal(3, await db.LibraryCategories.CountAsync(c => c.CreatedByUserId == owner.Id && !c.IsDefault));
+            Assert.True(await db.LibraryCategories.AnyAsync(c => c.CreatedByUserId == owner.Id && c.Name == "Hoạt hình" && !c.IsDefault));
+        }
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/library/categories")).StatusCode);
     }
 
     [Fact]
-    public async Task Concurrent_default_ensure_and_slug_collisions_do_not_create_duplicates_or_database_errors()
+    public async Task Concurrent_empty_category_lists_and_custom_slug_collisions_are_safe()
     {
         var user = await User();
         var initial = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Send(user.Token, HttpMethod.Get, "/api/library/categories")));
-        foreach (var response in initial) { Assert.Equal(HttpStatusCode.OK, response.StatusCode); Assert.Equal(4, (await response.Content.ReadFromJsonAsync<JsonElement>()).GetArrayLength()); response.Dispose(); }
+        foreach (var response in initial) { Assert.Equal(HttpStatusCode.OK, response.StatusCode); Assert.Empty((await response.Content.ReadFromJsonAsync<JsonElement>()).EnumerateArray()); response.Dispose(); }
         var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Send(user.Token, HttpMethod.Post, "/api/library/categories", new { name = "Du lịch" })));
         var slugs = new HashSet<string>();
         foreach (var response in results) { Assert.Equal(HttpStatusCode.Created, response.StatusCode); slugs.Add((await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("slug").GetString()!); response.Dispose(); }
         Assert.Equal(6, slugs.Count); Assert.Contains("du-lich", slugs); Assert.Contains("du-lich-6", slugs);
         await using var scope = factory.Services.CreateAsyncScope();
-        Assert.Equal(10, await scope.ServiceProvider.GetRequiredService<AppDbContext>().LibraryCategories.CountAsync(c => c.CreatedByUserId == user.Id));
+        Assert.Equal(6, await scope.ServiceProvider.GetRequiredService<AppDbContext>().LibraryCategories.CountAsync(c => c.CreatedByUserId == user.Id && !c.IsDefault));
     }
 
     [Fact]
@@ -134,14 +198,16 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
     {
         var owner = await User();
         var other = await User();
+        var gatheringSlug = await CreateUserCategory(owner.Token, "Họp mặt dòng tộc");
+        var templeSlug = await CreateUserCategory(owner.Token, "Từ đường");
         var id = (await Create(owner.Token)).GetProperty("id").GetInt64();
         var uploadCountBeforeInvalidDate = storage.UploadCount;
         using var invalidDateUpload = await Upload(owner.Token, id, [("invalid.jpg", "image/jpeg", Jpeg)],
-            new LibraryPhotoMetadataDto { Category = "events", DisplayDate = "adasdas" });
+            new LibraryPhotoMetadataDto { Category = gatheringSlug, DisplayDate = "adasdas" });
         Assert.Equal(HttpStatusCode.BadRequest, invalidDateUpload.StatusCode);
         Assert.Equal("LIBRARY_INVALID_DISPLAY_DATE", (await invalidDateUpload.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
         Assert.Equal(uploadCountBeforeInvalidDate, storage.UploadCount);
-        var metadata = new LibraryPhotoMetadataDto { Title = "  Họp mặt 2026  ", Category = "events",
+        var metadata = new LibraryPhotoMetadataDto { Title = "  Họp mặt 2026  ", Category = gatheringSlug,
             DisplayDate = "09/10/2026", Description = "Ảnh đại gia đình", Author = "Ban liên lạc" };
         using var upload = await Upload(owner.Token, id, [("a.jpg", "image/jpeg", Jpeg), ("b.png", "image/png", Png)], metadata);
         Assert.Equal(HttpStatusCode.Created, upload.StatusCode);
@@ -149,7 +215,7 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         foreach (var photo in photos.EnumerateArray())
         {
             Assert.Equal("Họp mặt 2026", photo.GetProperty("title").GetString());
-            Assert.Equal("events", photo.GetProperty("category").GetString());
+            Assert.Equal(gatheringSlug, photo.GetProperty("category").GetString());
             Assert.Equal("09/10/2026", photo.GetProperty("displayDate").GetString());
             Assert.Equal("Ảnh đại gia đình", photo.GetProperty("description").GetString());
             Assert.Equal(photo.GetProperty("caption").GetString(), photo.GetProperty("description").GetString());
@@ -161,10 +227,10 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         await using (var scope = factory.Services.CreateAsyncScope())
             fileId = (await scope.ServiceProvider.GetRequiredService<AppDbContext>().LibraryPhotos.SingleAsync(p => p.Id == photoId)).DriveFileId;
         using var invalidEditDate = await Send(owner.Token, HttpMethod.Put, $"/api/library/photos/{photoId}",
-            new { title = "Từ đường", category = "temple", displayDate = "31/02/2026", description = "Mô tả mới", author = "Nguồn gia đình" });
+            new { title = "Từ đường", category = templeSlug, displayDate = "31/02/2026", description = "Mô tả mới", author = "Nguồn gia đình" });
         Assert.Equal(HttpStatusCode.BadRequest, invalidEditDate.StatusCode);
         Assert.Equal("LIBRARY_INVALID_DISPLAY_DATE", (await invalidEditDate.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
-        var edit = new { title = "Từ đường", category = "temple", displayDate = "09/10/2020", description = "Mô tả mới", author = "Nguồn gia đình" };
+        var edit = new { title = "Từ đường", category = templeSlug, displayDate = "09/10/2020", description = "Mô tả mới", author = "Nguồn gia đình" };
         using var denied = await Send(other.Token, HttpMethod.Put, $"/api/library/photos/{photoId}", edit);
         Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
         Assert.Equal("LIBRARY_NOT_FOUND", (await denied.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
@@ -175,7 +241,7 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         using var detail = await Send(owner.Token, HttpMethod.Get, $"/api/library/albums/{id}");
         var roundTrip = (await detail.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("photos")[0];
         Assert.Equal("Từ đường", roundTrip.GetProperty("title").GetString());
-        Assert.Equal("temple", roundTrip.GetProperty("category").GetString());
+        Assert.Equal(templeSlug, roundTrip.GetProperty("category").GetString());
         Assert.Equal("09/10/2020", roundTrip.GetProperty("displayDate").GetString());
         Assert.Equal("Mô tả mới", roundTrip.GetProperty("description").GetString());
         Assert.Equal(calls, storage.UploadCount);
@@ -496,6 +562,12 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         return await response.Content.ReadFromJsonAsync<JsonElement>();
     }
+    private async Task<string> CreateUserCategory(string token, string name)
+    {
+        using var response = await Send(token, HttpMethod.Post, "/api/library/categories", new { name });
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("slug").GetString()!;
+    }
     private async Task<HttpResponseMessage> Send(string token, HttpMethod method, string path, object? body = null)
     {
         using var request = new HttpRequestMessage(method, path) { Content = body is null ? null : JsonContent.Create(body) };
@@ -504,15 +576,13 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
     }
     private async Task<HttpResponseMessage> Upload(string token, long albumId, (string Name, string Mime, byte[] Bytes)[] files, LibraryPhotoMetadataDto? metadata = null)
     {
+        metadata ??= new LibraryPhotoMetadataDto { Category = await CreateUserCategory(token, $"Test category {Guid.NewGuid():N}") };
         using var form = new MultipartFormDataContent();
-        if (metadata is not null)
-        {
-            form.Add(new StringContent(metadata.Title ?? ""), "title");
-            form.Add(new StringContent(metadata.Category), "category");
-            form.Add(new StringContent(metadata.DisplayDate ?? ""), "displayDate");
-            form.Add(new StringContent(metadata.Description ?? ""), "description");
-            form.Add(new StringContent(metadata.Author ?? ""), "author");
-        }
+        form.Add(new StringContent(metadata.Title ?? ""), "title");
+        form.Add(new StringContent(metadata.Category), "category");
+        form.Add(new StringContent(metadata.DisplayDate ?? ""), "displayDate");
+        form.Add(new StringContent(metadata.Description ?? ""), "description");
+        form.Add(new StringContent(metadata.Author ?? ""), "author");
         foreach (var file in files)
         {
             var content = new ByteArrayContent(file.Bytes);

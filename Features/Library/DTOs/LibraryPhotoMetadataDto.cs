@@ -8,7 +8,7 @@ public sealed class LibraryPhotoMetadataDto
 {
     [StringLength(200)] public string? Title { get; set; }
     [Required, StringLength(64)]
-    public string Category { get; set; } = "photos";
+    public string Category { get; set; } = string.Empty;
     [StringLength(100)] public string? DisplayDate { get; set; }
     [StringLength(2000)] public string? Description { get; set; }
     [StringLength(200)] public string? Author { get; set; }

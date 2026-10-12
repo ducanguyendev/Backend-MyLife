@@ -6,24 +6,10 @@ namespace MyLife.Features.Library.Services;
 
 public sealed partial class LibraryService
 {
-    private static readonly (string Slug, string Name)[] DefaultCategories = [
-        ("photos", "Ảnh tư liệu"), ("decrees", "Sắc phong & Gia phả"),
-        ("events", "Họp mặt dòng tộc"), ("temple", "Từ đường & Lăng mộ")
-    ];
-
-    public async Task EnsureDefaultLibraryCategoriesAsync(int userId, CancellationToken ct)
-    {
-        await using var transaction = await db.Database.BeginTransactionAsync(ct);
-        await LockCategoryRegistryAsync(userId, ct);
-        await EnsureDefaultCategoriesCoreAsync(userId, ct);
-        await transaction.CommitAsync(ct);
-    }
-
     public async Task<IReadOnlyList<LibraryCategoryDto>> ListCategoriesAsync(int userId, CancellationToken ct)
     {
-        await EnsureDefaultLibraryCategoriesAsync(userId, ct);
-        return await db.LibraryCategories.AsNoTracking().Where(c => c.CreatedByUserId == userId)
-            .OrderByDescending(c => c.IsDefault).ThenBy(c => c.Name).ThenBy(c => c.Id)
+        return await db.LibraryCategories.AsNoTracking().Where(c => c.CreatedByUserId == userId && !c.IsDefault)
+            .OrderBy(c => c.CreatedAt).ThenBy(c => c.Id)
             .Select(c => new LibraryCategoryDto(c.Id, c.Name, c.Slug, c.IsDefault)).ToListAsync(ct);
     }
 
@@ -34,9 +20,10 @@ public sealed partial class LibraryService
             throw new LibraryOperationException(400, "Category name is required (max 100 characters).", code: "LIBRARY_CATEGORY_INVALID");
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await LockCategoryRegistryAsync(userId, ct);
-        await EnsureDefaultCategoriesCoreAsync(userId, ct);
         var slugs = (await db.LibraryCategories.Where(c => c.CreatedByUserId == userId).Select(c => c.Slug).ToListAsync(ct)).ToHashSet(StringComparer.Ordinal);
         var baseSlug = LibraryCategorySlug.FromName(name);
+        if (baseSlug == "all")
+            throw new LibraryOperationException(400, "The all category slug is reserved.", code: "LIBRARY_CATEGORY_INVALID");
         var slug = baseSlug;
         for (var suffix = 2; slugs.Contains(slug); suffix++) slug = LibraryCategorySlug.WithSuffix(baseSlug, suffix);
         var now = DateTime.UtcNow;
@@ -89,19 +76,9 @@ public sealed partial class LibraryService
         await db.Database.ExecuteSqlInterpolatedAsync($"SELECT id FROM users WHERE id = {userId} FOR UPDATE", ct);
     }
 
-    private async Task EnsureDefaultCategoriesCoreAsync(int userId, CancellationToken ct)
-    {
-        var existing = (await db.LibraryCategories.Where(c => c.CreatedByUserId == userId).Select(c => c.Slug).ToListAsync(ct)).ToHashSet();
-        var now = DateTime.UtcNow;
-        foreach (var (slug, name) in DefaultCategories.Where(c => !existing.Contains(c.Slug)))
-            db.LibraryCategories.Add(new LibraryCategory { CreatedByUserId = userId, Name = name, Slug = slug,
-                IsDefault = true, CreatedAt = now, UpdatedAt = now });
-        await db.SaveChangesAsync(ct);
-    }
-
     private async Task ValidateCategoryAsync(int userId, string slug, CancellationToken ct)
     {
-        if (slug == "all" || !await db.LibraryCategories.AnyAsync(c => c.CreatedByUserId == userId && c.Slug == slug, ct))
+        if (slug == "all" || !await db.LibraryCategories.AnyAsync(c => c.CreatedByUserId == userId && !c.IsDefault && c.Slug == slug, ct))
             throw new LibraryOperationException(400, "Category does not belong to the current user.", code: "LIBRARY_CATEGORY_INVALID");
     }
 }

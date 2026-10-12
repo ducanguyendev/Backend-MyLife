@@ -12,7 +12,7 @@ public sealed class LibraryPhoto
     public long FileSize { get; set; }
     public string? Caption { get; set; }
     public string? Title { get; set; }
-    public string Category { get; set; } = "photos";
+    public string Category { get; set; } = string.Empty;
     public string? DisplayDate { get; set; }
     public string? Author { get; set; }
     public int SortOrder { get; set; }

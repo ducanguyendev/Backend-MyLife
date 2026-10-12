@@ -86,7 +86,6 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
         foreach (var file in files) LibraryUploadRules.ValidateFile(file);
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await LockCategoryRegistryAsync(userId, ct);
-        await EnsureDefaultCategoriesCoreAsync(userId, ct);
         await ValidateCategoryAsync(userId, metadata.Category, ct);
         var album = await LockAlbumAsync(userId, albumId, ct);
         var folderId = RequireFolder(album);
@@ -158,7 +157,6 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
             .Select(p => (long?)p.AlbumId).SingleOrDefaultAsync(ct) ?? throw NotFound();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         await LockCategoryRegistryAsync(userId, ct);
-        await EnsureDefaultCategoriesCoreAsync(userId, ct);
         await ValidateCategoryAsync(userId, metadata.Category, ct);
         var album = await LockAlbumAsync(userId, albumId, ct);
         var photo = await db.LibraryPhotos.SingleOrDefaultAsync(p => p.Id == photoId && p.AlbumId == albumId, ct) ?? throw NotFound();
