@@ -197,6 +197,7 @@ FamilyTree codes: `FAMILY_MEMBER_NOT_FOUND`, `FAMILY_RELATED_MEMBER_NOT_FOUND`,
 `FAMILY_RELATIONSHIP_INVALID`, `FAMILY_RELATIONSHIP_CYCLE`, `FAMILY_VALIDATION_FAILED`.
 Library codes: `LIBRARY_NOT_FOUND`, `LIBRARY_INVALID_IMAGE`,
 `LIBRARY_IMAGE_SIZE_INVALID`, `LIBRARY_FILE_COUNT_INVALID`, `LIBRARY_METADATA_INVALID`,
+`LIBRARY_INVALID_DISPLAY_DATE`,
 `LIBRARY_VALIDATION_FAILED`, `LIBRARY_STORAGE_FAILED`, `LIBRARY_SAVE_FAILED`,
 `LIBRARY_ALBUM_UNAVAILABLE`, `LIBRARY_CLEANUP_FAILED`; an invalid active-user
 session can return `AUTH_SESSION_INVALID` with 401.
@@ -217,6 +218,8 @@ DriveFileId is read-only in PhotoDto; photo write DTOs cannot change storage
 identity. The UI tries stored URL then the Drive thumbnail once per candidate,
 shows a localized placeholder on failure, and opens the original Drive view
 when the ID is available. Existing stored URLs and media are unchanged.
+Photo metadata `displayDate` is optional; when supplied, it must be a valid
+non-future `DD/MM/YYYY` calendar date (including leap-year validation).
 
 ## Administration
 

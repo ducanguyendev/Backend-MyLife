@@ -135,8 +135,14 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         var owner = await User();
         var other = await User();
         var id = (await Create(owner.Token)).GetProperty("id").GetInt64();
+        var uploadCountBeforeInvalidDate = storage.UploadCount;
+        using var invalidDateUpload = await Upload(owner.Token, id, [("invalid.jpg", "image/jpeg", Jpeg)],
+            new LibraryPhotoMetadataDto { Category = "events", DisplayDate = "adasdas" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalidDateUpload.StatusCode);
+        Assert.Equal("LIBRARY_INVALID_DISPLAY_DATE", (await invalidDateUpload.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        Assert.Equal(uploadCountBeforeInvalidDate, storage.UploadCount);
         var metadata = new LibraryPhotoMetadataDto { Title = "  Họp mặt 2026  ", Category = "events",
-            DisplayDate = "Xuân 2026", Description = "Ảnh đại gia đình", Author = "Ban liên lạc" };
+            DisplayDate = "09/10/2026", Description = "Ảnh đại gia đình", Author = "Ban liên lạc" };
         using var upload = await Upload(owner.Token, id, [("a.jpg", "image/jpeg", Jpeg), ("b.png", "image/png", Png)], metadata);
         Assert.Equal(HttpStatusCode.Created, upload.StatusCode);
         var photos = await upload.Content.ReadFromJsonAsync<JsonElement>();
@@ -144,7 +150,7 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         {
             Assert.Equal("Họp mặt 2026", photo.GetProperty("title").GetString());
             Assert.Equal("events", photo.GetProperty("category").GetString());
-            Assert.Equal("Xuân 2026", photo.GetProperty("displayDate").GetString());
+            Assert.Equal("09/10/2026", photo.GetProperty("displayDate").GetString());
             Assert.Equal("Ảnh đại gia đình", photo.GetProperty("description").GetString());
             Assert.Equal(photo.GetProperty("caption").GetString(), photo.GetProperty("description").GetString());
             Assert.Equal("Ban liên lạc", photo.GetProperty("author").GetString());
@@ -154,7 +160,11 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         string fileId;
         await using (var scope = factory.Services.CreateAsyncScope())
             fileId = (await scope.ServiceProvider.GetRequiredService<AppDbContext>().LibraryPhotos.SingleAsync(p => p.Id == photoId)).DriveFileId;
-        var edit = new { title = "Từ đường", category = "temple", displayDate = "1820", description = "Mô tả mới", author = "Nguồn gia đình" };
+        using var invalidEditDate = await Send(owner.Token, HttpMethod.Put, $"/api/library/photos/{photoId}",
+            new { title = "Từ đường", category = "temple", displayDate = "31/02/2026", description = "Mô tả mới", author = "Nguồn gia đình" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalidEditDate.StatusCode);
+        Assert.Equal("LIBRARY_INVALID_DISPLAY_DATE", (await invalidEditDate.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        var edit = new { title = "Từ đường", category = "temple", displayDate = "09/10/2020", description = "Mô tả mới", author = "Nguồn gia đình" };
         using var denied = await Send(other.Token, HttpMethod.Put, $"/api/library/photos/{photoId}", edit);
         Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
         Assert.Equal("LIBRARY_NOT_FOUND", (await denied.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
@@ -166,6 +176,7 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         var roundTrip = (await detail.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("photos")[0];
         Assert.Equal("Từ đường", roundTrip.GetProperty("title").GetString());
         Assert.Equal("temple", roundTrip.GetProperty("category").GetString());
+        Assert.Equal("09/10/2020", roundTrip.GetProperty("displayDate").GetString());
         Assert.Equal("Mô tả mới", roundTrip.GetProperty("description").GetString());
         Assert.Equal(calls, storage.UploadCount);
         await using (var scope = factory.Services.CreateAsyncScope())

@@ -189,6 +189,8 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
         photo.Title, photo.Category, photo.DisplayDate, photo.Author, photo.DriveFileId);
     private static void ValidatePhotoMetadata(LibraryPhotoMetadataDto metadata)
     {
+        if (!LibraryDisplayDateRules.IsValid(metadata.DisplayDate))
+            throw new LibraryOperationException(400, "Display date must be a valid past or current DD/MM/YYYY date.", code: "LIBRARY_INVALID_DISPLAY_DATE");
         if (string.IsNullOrWhiteSpace(metadata.Category) || metadata.Category.Length > 64 || metadata.Category == "all" ||
             metadata.Title?.Length > 200 || metadata.DisplayDate?.Length > 100 ||
             metadata.Description?.Length > 2000 || metadata.Author?.Length > 200)
