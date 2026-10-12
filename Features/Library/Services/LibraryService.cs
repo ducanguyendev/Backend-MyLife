@@ -6,7 +6,8 @@ using MyLife.Shared.Entities;
 
 namespace MyLife.Features.Library.Services;
 
-public sealed partial class LibraryService(AppDbContext db, ILibraryStorageService storage, ILogger<LibraryService> logger) : ILibraryService
+public sealed partial class LibraryService(AppDbContext db, ILibraryStorageService storage,
+    ILibraryPhotoImageCache imageCache, ILogger<LibraryService> logger) : ILibraryService
 {
     public async Task<AlbumDto> CreateAlbumAsync(int userId, CreateAlbumDto dto, CancellationToken ct)
     {
@@ -47,9 +48,21 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
     {
         var album = await db.LibraryAlbums.AsNoTracking().Include(a => a.Photos).Include(a => a.CoverPhoto)
             .SingleOrDefaultAsync(a => a.Id == albumId && a.CreatedByUserId == userId, ct) ?? throw NotFound();
-        return new(album.Id, album.Name, album.Description, album.Photos.Count, album.CoverPhoto?.Url,
+        return new(album.Id, album.Name, album.Description, album.Photos.Count, album.CoverPhoto?.Url, album.CoverPhotoId,
             album.CreatedAt, album.UpdatedAt, album.Photos.OrderBy(p => p.SortOrder).ThenBy(p => p.CreatedAt)
                 .ThenBy(p => p.Id).Select(ToPhotoDto).ToList());
+    }
+
+    public async Task<LibraryImageReadResult?> GetPhotoImageAsync(int userId, long photoId, CancellationToken ct)
+    {
+        var photo = await db.LibraryPhotos.AsNoTracking()
+            .Where(p => p.Id == photoId && p.Album.CreatedByUserId == userId)
+            .Select(p => new { p.Id, p.DriveFileId, p.ContentType, p.FileSize, p.CreatedAt, AlbumDriveFolderId = p.Album.DriveFolderId })
+            .SingleOrDefaultAsync(ct);
+        if (photo is null) return null;
+        if (string.IsNullOrWhiteSpace(photo.AlbumDriveFolderId)) throw new LibraryImageStorageException();
+        return await storage.ReadPhotoAsync(photo.Id, photo.AlbumDriveFolderId, photo.DriveFileId,
+            photo.ContentType, photo.FileSize, photo.CreatedAt, ct);
     }
 
     public async Task<AlbumDto> UpdateAlbumAsync(int userId, long albumId, UpdateAlbumDto dto, CancellationToken ct)
@@ -135,6 +148,7 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
         album.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
+        imageCache.Invalidate(photo.Id, photo.DriveFileId, photo.CreatedAt);
     }
 
     public async Task<PhotoDto> UpdatePhotoAsync(int userId, long photoId, LibraryPhotoMetadataDto metadata, CancellationToken ct)
@@ -159,6 +173,8 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
     {
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         var album = await LockAlbumAsync(userId, albumId, ct);
+        var photoVersions = await db.LibraryPhotos.AsNoTracking().Where(p => p.AlbumId == album.Id)
+            .Select(p => new { p.Id, p.DriveFileId, p.CreatedAt }).ToListAsync(ct);
         if (!await storage.DeleteAlbumFolderAsync(RequireFolder(album), ct))
             throw new LibraryOperationException(502, "Unable to delete the Drive album folder. Database metadata was kept.");
         // Break the cover reference before the album cascades its photo rows.
@@ -167,6 +183,7 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
         db.LibraryAlbums.Remove(album);
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
+        foreach (var photo in photoVersions) imageCache.Invalidate(photo.Id, photo.DriveFileId, photo.CreatedAt);
     }
 
     private async Task<LibraryAlbum> LockAlbumAsync(int userId, long albumId, CancellationToken ct)
@@ -181,9 +198,9 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
     private IQueryable<AlbumDto> SummaryQuery(int userId, long? albumId = null) => db.LibraryAlbums.AsNoTracking()
         .Where(a => a.CreatedByUserId == userId && (albumId == null || a.Id == albumId))
         .OrderByDescending(a => a.UpdatedAt).ThenByDescending(a => a.Id).Select(a => new AlbumDto(a.Id, a.Name, a.Description,
-            a.Photos.Count, a.CoverPhoto == null ? null : a.CoverPhoto.Url, a.CreatedAt, a.UpdatedAt));
+            a.Photos.Count, a.CoverPhoto == null ? null : a.CoverPhoto.Url, a.CoverPhotoId, a.CreatedAt, a.UpdatedAt));
     private static AlbumDto ToAlbumDto(LibraryAlbum album, int count, string? coverUrl) =>
-        new(album.Id, album.Name, album.Description, count, coverUrl, album.CreatedAt, album.UpdatedAt);
+        new(album.Id, album.Name, album.Description, count, coverUrl, album.CoverPhotoId, album.CreatedAt, album.UpdatedAt);
     private static PhotoDto ToPhotoDto(LibraryPhoto photo) => new(photo.Id, photo.Url, photo.FileName,
         photo.ContentType, photo.FileSize, photo.Caption, photo.SortOrder, photo.TakenAt, photo.CreatedAt,
         photo.Title, photo.Category, photo.DisplayDate, photo.Author, photo.DriveFileId);

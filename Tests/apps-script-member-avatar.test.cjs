@@ -246,7 +246,7 @@ test('complete dispatcher supports all three contracts; diagnostics expose versi
   const diagnostic = drive.diagnostics(); assert.equal(diagnostic.contractVersion, 'drive-v2-verified-overwrite-v2');
   assert.equal(diagnostic.avatarContractVersion, diagnostic.contractVersion);
   assert.equal(diagnostic.memberAvatarContractVersion, 'member-avatar-v1-drive-v2-verified-overwrite');
-  assert.equal(diagnostic.libraryContractVersion, 'library-phase1-v1');
+  assert.equal(diagnostic.libraryContractVersion, 'library-read-photo-v2');
   for (const [key, id] of Object.entries(drive.properties)) {
     assert.equal(Object.hasOwn(diagnostic, key), false);
     assert.equal(Object.values(diagnostic).includes(id), false);

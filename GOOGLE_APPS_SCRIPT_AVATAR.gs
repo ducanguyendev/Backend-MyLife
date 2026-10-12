@@ -36,15 +36,21 @@ function doGet() {
     contractVersion: 'drive-v2-verified-overwrite-v2',
     avatarContractVersion: 'drive-v2-verified-overwrite-v2',
     memberAvatarContractVersion: 'member-avatar-v1-drive-v2-verified-overwrite',
-    libraryContractVersion: 'library-phase1-v1' });
+    libraryContractVersion: 'library-read-photo-v2' });
 }
 
 function doPost(event) {
   var lock = LockService.getScriptLock();
+  var locked = false;
+  var action = '';
   try {
-    lock.waitLock(30000);
     var body = parseBody_(event);
-    var action = String(body.action || '').toLowerCase();
+    action = String(body.action || '').toLowerCase();
+    // Reads do not mutate Drive and can run concurrently; keep the existing
+    // script lock around every write/delete action below.
+    if (action === 'library_read_photo') return libraryReadPhoto_(body);
+    lock.waitLock(30000);
+    locked = true;
     if (action === 'upload') return uploadAvatar_(body);
     if (action === 'delete') return deleteAvatar_(body);
     if (action === 'member_avatar_upload') return uploadMemberAvatar_(body);
@@ -56,11 +62,12 @@ function doPost(event) {
     return jsonResponse_({ success: false, message: 'Unsupported action.' });
   } catch (error) {
     console.error(error && error.stack ? error.stack : error);
+    if (action === 'library_read_photo') return jsonResponse_({ success: false, code: 'LIBRARY_PHOTO_READ_FAILED' });
     var message = action && action.indexOf('library_') === 0 ? 'Library storage request failed.' :
       action && action.indexOf('member_avatar_') === 0 ? 'Member avatar storage request failed.' : 'Avatar storage request failed.';
     return jsonResponse_({ success: false, message: message });
   } finally {
-    try { lock.releaseLock(); } catch (_) {}
+    if (locked) try { lock.releaseLock(); } catch (_) {}
   }
 }
 
@@ -460,6 +467,35 @@ function libraryDeleteAlbum_(body) {
   var folder = libraryAlbumFolder_(body.folderId, true);
   if (!folder.isTrashed()) folder.setTrashed(true);
   return jsonResponse_({ success: true, deleted: true });
+}
+
+function libraryReadPhoto_(body) {
+  var fileId = String(body.fileId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,255}$/.test(fileId)) throw new Error('Invalid Library photo ID.');
+  var folder = libraryAlbumFolder_(body.folderId, false);
+  var file = DriveApp.getFileById(fileId);
+  if (file.isTrashed()) throw new Error('Library photo is trashed.');
+  var parents = file.getParents();
+  var contained = false;
+  while (parents.hasNext()) {
+    if (parents.next().getId() === folder.getId()) contained = true;
+  }
+  if (!contained) throw new Error('Library photo is outside the specified album.');
+
+  var metadata = Drive.Files.get(fileId, {
+    supportsAllDrives: true, fields: 'id,md5Checksum,mimeType,fileSize'
+  });
+  var contentType = String(metadata.mimeType || '').trim().toLowerCase();
+  if (metadata.id !== fileId || !LIBRARY_EXTENSIONS[contentType]) throw new Error('Invalid Library photo metadata.');
+  var bytes = file.getBlob().getBytes();
+  var checksum = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, bytes)
+    .map(function (value) { return ('0' + ((value + 256) % 256).toString(16)).slice(-2); }).join('');
+  if (!bytes.length || bytes.length > MAX_LIBRARY_PHOTO_BYTES ||
+      Number(metadata.fileSize) !== bytes.length || metadata.md5Checksum !== checksum ||
+      !libraryMatchingSignature_(bytes, contentType)) throw new Error('Library photo bytes failed verification.');
+
+  return jsonResponse_({ success: true, fileId: fileId, contentType: contentType,
+    fileSize: bytes.length, md5Checksum: checksum, fileBase64: Utilities.base64Encode(bytes) });
 }
 
 function libraryMatchingSignature_(bytes, contentType) {

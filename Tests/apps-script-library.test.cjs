@@ -30,6 +30,7 @@ function setup() {
         const fileId = `file-${++nextId}`;
         const file = { id: fileId, bytes: Buffer.from(blob.bytes), type: blob.type, name: blob.name, trashed: false,
           getId: () => fileId, isTrashed: () => file.trashed, getParents: () => iterator([folder]),
+          getBlob: () => ({ getBytes: () => [...file.bytes].map(x => x > 127 ? x - 256 : x), getContentType: () => file.type }),
           setSharing: () => { if (failSharing) throw new Error('Sharing failed'); },
           setTrashed: value => { if (failTrash) throw new Error('Trash failed'); file.trashed = value; },
         };
@@ -49,6 +50,7 @@ function setup() {
     PropertiesService: { getScriptProperties: () => ({ getProperty: key => properties[key] }) },
     ContentService: { MimeType: { JSON: 'json' }, createTextOutput: text => ({ setMimeType: () => JSON.parse(text) }) },
     Utilities: { DigestAlgorithm: { MD5: 'md5' }, base64Decode: base64 => [...Buffer.from(base64, 'base64')].map(x => x > 127 ? x - 256 : x),
+      base64Encode: bytes => Buffer.from(bytes).toString('base64'),
       newBlob: (bytes, type, name) => ({ bytes: Buffer.from(bytes), type, name }),
       computeDigest: (algorithm, bytes) => [...createHash(algorithm).update(Buffer.from(bytes)).digest()].map(x => x > 127 ? x - 256 : x) },
     DriveApp: {
@@ -71,7 +73,8 @@ function setup() {
     return post({ action: 'library_upload_photo', folderId, contentType: image.contentType, fileBase64: image.base64,
       fileName: `photo_${String(index + 1).padStart(32, '0')}.${extension}`, ...override });
   };
-  return { post, create, upload, folders, files, properties, addFolder, errors,
+  const read = (folderId, fileId) => post({ action: 'library_read_photo', folderId, fileId });
+  return { get: () => context.doGet(), post, create, upload, read, folders, files, properties, addFolder, errors,
     corrupt: () => { corruptMetadata = true; }, failSharing: () => { failSharing = true; }, failTrash: () => { failTrash = true; } };
 }
 
@@ -102,6 +105,45 @@ test('multiple images go into the album with exact bytes, MIME, MD5 and file siz
     ids.push(result.fileId);
   }
   assert.equal(new Set(ids).size, 3);
+});
+
+test('library_read_photo returns exact Drive bytes and verified metadata for JPEG, PNG, WebP and GIF', () => {
+  const drive = setup(); const album = drive.create(29);
+  const images = fixtures.map((image, index) => ({
+    contentType: image.contentType, base64: image.base64, fileName: `photo_${String(index + 1).padStart(32, '0')}.${{ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[image.contentType]}`,
+  }));
+  images.push({ contentType: 'image/gif', base64: Buffer.from('GIF89a-test').toString('base64'), fileName: `photo_${'a'.repeat(32)}.gif` });
+  for (const image of images) {
+    const stored = drive.upload(album.folderId, 0, { contentType: image.contentType, fileBase64: image.base64, fileName: image.fileName });
+    assert.equal(stored.success, true);
+    const original = Buffer.from(image.base64, 'base64');
+    const result = drive.read(album.folderId, stored.fileId);
+    assert.equal(result.success, true);
+    assert.equal(result.fileId, stored.fileId);
+    assert.equal(result.contentType, image.contentType);
+    assert.equal(result.fileSize, original.length);
+    assert.equal(result.md5Checksum, createHash('md5').update(original).digest('hex'));
+    assert.deepEqual(Buffer.from(result.fileBase64, 'base64'), original);
+    assert.equal(Object.hasOwn(result, 'url'), false);
+  }
+});
+
+test('library_read_photo rejects invalid folder/file identities and files outside the requested album', () => {
+  const drive = setup(); const first = drive.create(30); const second = drive.create(31);
+  const photo = drive.upload(first.folderId);
+  const foreignPhoto = drive.upload(second.folderId);
+  for (const [folderId, fileId] of [
+    [first.folderId, 'bad/id'], ['missing-folder', photo.fileId], [first.folderId, 'missing-file'],
+    [first.folderId, foreignPhoto.fileId], ['library', photo.fileId],
+  ]) {
+    const result = drive.read(folderId, fileId);
+    assert.equal(result.success, false);
+    assert.equal(result.code, 'LIBRARY_PHOTO_READ_FAILED');
+  }
+});
+
+test('Apps Script GET contract advertises the photo read action version', () => {
+  assert.equal(setup().get().libraryContractVersion, 'library-read-photo-v2');
 });
 
 test('jpg alias normalizes to jpeg; GIF signature is supported', () => {

@@ -55,6 +55,7 @@ An inaccessible album/photo returns 404, and list includes only the caller's alb
 | POST | `/api/library/albums` | JSON `{ "name": "Gia đình 2026", "description": "..." }`; 201 `AlbumDto`, Location points to detail. |
 | GET | `/api/library/albums` | 200 `AlbumDto[]`, updatedAt descending, id descending tie-break. |
 | GET | `/api/library/albums/{albumId}` | 200 `AlbumDetailDto`, with photos ordered sortOrder, createdAt, id ascending. |
+| GET | `/api/library/photos/{photoId}/image` | Streams validated image bytes for an owned photo; foreign/missing photo is 404, rejected/unavailable upstream is 502. Private revalidated ETag; no Drive redirect. |
 | PUT | `/api/library/albums/{albumId}` | Same JSON as create; 200 `AlbumDto`; does not rename Drive folder. |
 | POST | `/api/library/albums/{albumId}/photos` | Multipart `files`, 1–20 files, plus shared photo metadata below; 201 `PhotoDto[]`. |
 | PUT | `/api/library/photos/{photoId}` | JSON photo metadata; 200 `PhotoDto`. Edits DB metadata only, preserving Drive file ID/bytes. |
@@ -66,11 +67,12 @@ An inaccessible album/photo returns 404, and list includes only the caller's alb
 | DELETE | `/api/library/categories/{id}` | 204 for an unused custom category owned by the caller; 404 when missing/not owned; 409 for default/in-use categories. |
 
 Library success payloads are direct DTOs/arrays, not `{ success, data }` wrappers.
+The image route calls the existing Apps Script `library_read_photo` action, accepts JPEG/PNG/WebP/GIF up to 5 MiB, and validates returned file identity, MIME, stored size, decoded byte count, MD5 and file signature. It caches bytes for 30 minutes and failures for 20 seconds, and evicts photo bytes after photo or album deletion. Browser gallery and lightbox use this route; only the explicit open-original action uses a Drive view link.
 Errors retain `{ "success": false, "message": "..." }`: 400 validation, 401 auth,
 404 inaccessible/missing resource, 502 storage failure, 503 persistence/unavailable
 folder. Oversized request bodies can be rejected with 413 before the controller.
 
-`AlbumDto`: `id`, `name`, `description`, `photoCount`, `coverPhotoUrl`, `createdAt`,
+`AlbumDto`: `id`, `name`, `description`, `photoCount`, `coverPhotoUrl`, `coverPhotoId`, `createdAt`,
 `updatedAt`. Detail adds `photos`. `PhotoDto`: `id`, `driveFileId`, `url`, `fileName`, `contentType`,
 `fileSize`, `caption`, `sortOrder`, `takenAt`, `createdAt`, `title`, `category`,
 `displayDate`, `description`, `author`. IDs are Int64; timestamps are UTC.
@@ -111,13 +113,18 @@ since Drive and PostgreSQL have no distributed transaction; see
 
 Drive identity is `album_<DB id>` and a generated `photo_<uuid>.<mime extension>`.
 Original filenames are retained in DB for display, never used as Drive identity.
-URLs in DB are stable `https://lh3.googleusercontent.com/d/{fileId}` without cache
-query strings. Direct images use anyone-with-link sharing like account avatars;
-metadata APIs enforce ownership, while a known direct image link can be viewed.
+Legacy URLs in DB remain stable `https://lh3.googleusercontent.com/d/{fileId}` for
+compatibility, but the browser image route does not read from them. Library upload
+continues its existing Drive sharing/write behavior; image bytes are read through
+the ownership-checked backend route and Apps Script validates direct album membership.
 
 The complete deployable source remains `GOOGLE_APPS_SCRIPT_AVATAR.gs`, adding
 `library_create_album_folder`, `library_upload_photo`, `library_delete_photo`,
-`library_delete_album`. Configure a separate `LIBRARY_FOLDER_ID` Script Property;
+`library_delete_album`, and `library_read_photo`. The GET contract reports
+`libraryContractVersion: library-read-photo-v2`. The read action accepts
+`{ action, folderId, fileId }`, verifies the active album folder and direct file
+parent, and returns `{ success, fileId, contentType, fileSize, md5Checksum,
+fileBase64 }` without a public image URL. Configure a separate `LIBRARY_FOLDER_ID` Script Property;
 leave `AVATAR_FOLDER_ID` unchanged. No folder IDs belong in backend config.
 
 ## FamilyMember avatar storage contract

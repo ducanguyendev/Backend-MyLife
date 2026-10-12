@@ -41,6 +41,24 @@ public sealed class LibraryController(ILibraryService service, ICurrentUserServi
     [HttpGet("albums/{albumId:long}")]
     public Task<IActionResult> Get(long albumId) => Run(async (userId, ct) => Ok(await service.GetAlbumAsync(userId, albumId, ct)));
 
+    [HttpGet("photos/{photoId:long}/image")]
+    public Task<IActionResult> GetPhotoImage(long photoId) => Run(async (userId, ct) =>
+    {
+        LibraryImageReadResult? image;
+        try { image = await service.GetPhotoImageAsync(userId, photoId, ct); }
+        catch (LibraryImageStorageException)
+        {
+            return StatusCode(502, new { success = false, code = "LIBRARY_IMAGE_UPSTREAM_FAILED", message = "The photo image is temporarily unavailable." });
+        }
+        if (image is null) return NotFound(new { success = false, code = "LIBRARY_PHOTO_NOT_FOUND", message = "Library photo not found." });
+        Response.Headers.CacheControl = "private, no-cache";
+        Response.Headers.ETag = image.ETag;
+        Response.Headers["X-Content-Type-Options"] = "nosniff";
+        var matches = Request.Headers.IfNoneMatch.SelectMany(value => (value ?? string.Empty).Split(','))
+            .Any(value => value.Trim() is "*" || string.Equals(value.Trim(), image.ETag, StringComparison.Ordinal));
+        return matches ? StatusCode(StatusCodes.Status304NotModified) : File(image.Content, image.ContentType);
+    });
+
     [HttpPut("albums/{albumId:long}")]
     public Task<IActionResult> Update(long albumId, UpdateAlbumDto dto) => Run(async (userId, ct) => Ok(await service.UpdateAlbumAsync(userId, albumId, dto, ct)));
 

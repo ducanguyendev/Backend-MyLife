@@ -433,6 +433,49 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         Assert.True(storage.Folders[$"folder-album-{id}"].Trashed);
     }
 
+    [Fact]
+    public async Task Photo_image_is_owned_cached_and_invalidated_after_photo_or_album_delete()
+    {
+        var owner = await User(); var other = await User();
+        var albumId = (await Create(owner.Token)).GetProperty("id").GetInt64();
+        using var upload = await Upload(owner.Token, albumId, [("a.jpg", "image/jpeg", Jpeg)]);
+        var photoId = (await upload.Content.ReadFromJsonAsync<JsonElement>())[0].GetProperty("id").GetInt64();
+
+        using var foreign = await Send(other.Token, HttpMethod.Get, $"/api/library/photos/{photoId}/image");
+        using var missing = await Send(owner.Token, HttpMethod.Get, "/api/library/photos/9223372036854775000/image");
+        Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+
+        using var first = await Send(owner.Token, HttpMethod.Get, $"/api/library/photos/{photoId}/image");
+        using var cached = await Send(owner.Token, HttpMethod.Get, $"/api/library/photos/{photoId}/image");
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode); Assert.Equal("image/jpeg", first.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("private, no-cache", first.Headers.CacheControl?.ToString());
+        Assert.Equal("nosniff", first.Headers.GetValues("X-Content-Type-Options").Single());
+        Assert.Equal(Jpeg, await first.Content.ReadAsByteArrayAsync());
+        Assert.Equal(first.Headers.ETag, cached.Headers.ETag);
+        Assert.Equal(1, storage.ImageReadCount);
+        using var conditionalRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/library/photos/{photoId}/image");
+        conditionalRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", owner.Token);
+        conditionalRequest.Headers.IfNoneMatch.Add(first.Headers.ETag!);
+        using var unchanged = await client.SendAsync(conditionalRequest);
+        Assert.Equal(HttpStatusCode.NotModified, unchanged.StatusCode);
+
+        using var remove = await Send(owner.Token, HttpMethod.Delete, $"/api/library/photos/{photoId}");
+        Assert.Equal(HttpStatusCode.NoContent, remove.StatusCode);
+        using var afterDelete = await Send(owner.Token, HttpMethod.Get, $"/api/library/photos/{photoId}/image");
+        Assert.Equal(HttpStatusCode.NotFound, afterDelete.StatusCode);
+
+        var album2 = (await Create(owner.Token, "Second album")).GetProperty("id").GetInt64();
+        using var upload2 = await Upload(owner.Token, album2, [("b.jpg", "image/jpeg", Jpeg)]);
+        var albumPhotoId = (await upload2.Content.ReadFromJsonAsync<JsonElement>())[0].GetProperty("id").GetInt64();
+        using var albumImage = await Send(owner.Token, HttpMethod.Get, $"/api/library/photos/{albumPhotoId}/image");
+        Assert.Equal(HttpStatusCode.OK, albumImage.StatusCode);
+        using var removeAlbum = await Send(owner.Token, HttpMethod.Delete, $"/api/library/albums/{album2}");
+        Assert.Equal(HttpStatusCode.NoContent, removeAlbum.StatusCode);
+        using var afterAlbumDelete = await Send(owner.Token, HttpMethod.Get, $"/api/library/photos/{albumPhotoId}/image");
+        Assert.Equal(HttpStatusCode.NotFound, afterAlbumDelete.StatusCode);
+    }
+
     private async Task<(string Token, int Id)> User()
     {
         var email = $"library.{Guid.NewGuid():N}@gmail.com";
@@ -496,6 +539,7 @@ public sealed class TestLibraryStorage : ILibraryStorageService
     public ConcurrentDictionary<string, Photo> Files { get; } = [];
     public ConcurrentQueue<(string Folder, string File)> DeletePhotoCalls { get; } = [];
     public int UploadCount { get; private set; }
+    public int ImageReadCount { get; private set; }
     public int FailOnUpload { get; set; } = -1;
     public bool ReturnFailedFileId { get; set; }
     public bool FailCreate { get; set; }
@@ -519,6 +563,14 @@ public sealed class TestLibraryStorage : ILibraryStorageService
         UploadEntered?.TrySetResult();
         if (UploadGate is not null) await UploadGate.Task.WaitAsync(cancellationToken);
         return new(UploadCount != FailOnUpload, id, $"https://lh3.googleusercontent.com/d/{id}", contentType, content.LongLength);
+    }
+    public Task<LibraryImageReadResult?> ReadPhotoAsync(long photoId, string albumDriveFolderId, string driveFileId,
+        string contentType, long fileSize, DateTime revision, CancellationToken cancellationToken)
+    {
+        ImageReadCount++;
+        if (!Files.TryGetValue(driveFileId, out var photo) || photo.Trashed) return Task.FromResult<LibraryImageReadResult?>(null);
+        var etag = $"\"test-{photoId}-{revision.Ticks}\"";
+        return Task.FromResult<LibraryImageReadResult?>(new(photo.Bytes.ToArray(), photo.Mime, etag));
     }
     public Task<bool> DeletePhotoAsync(string albumDriveFolderId, string driveFileId, CancellationToken cancellationToken)
     {

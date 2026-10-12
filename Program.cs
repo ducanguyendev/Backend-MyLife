@@ -78,6 +78,7 @@ builder.Services.AddScoped<IGoogleAvatarSyncService, GoogleAvatarSyncService>();
 builder.Services.AddScoped<IFamilyTreeService, FamilyTreeService>();
 builder.Services.AddMemoryCache(options => options.SizeLimit = 64L * 1024 * 1024);
 builder.Services.AddSingleton<IMemberAvatarImageCache, MemberAvatarImageCache>();
+builder.Services.AddSingleton<ILibraryPhotoImageCache, LibraryPhotoImageCache>();
 builder.Services.AddHttpClient(nameof(GoogleDriveMemberAvatarService), client => client.Timeout = TimeSpan.FromSeconds(45));
 builder.Services.AddScoped<IGoogleDriveMemberAvatarService, GoogleDriveMemberAvatarService>();
 builder.Services.AddHttpClient(nameof(GoogleDriveLibraryStorageService), client => client.Timeout = TimeSpan.FromSeconds(45));

@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using MyLife.Features.Library.Services;
 using Xunit;
@@ -80,11 +81,65 @@ public sealed class GoogleDriveLibraryStorageServiceTests
         Assert.False(await rejected.DeleteAlbumFolderAsync("folder-1", default));
     }
 
-    private static GoogleDriveLibraryStorageService Service(HttpMessageHandler handler) => new(
+    [Fact]
+    public async Task Image_read_uses_apps_script_contract_and_cache()
+    {
+        var handler = new ReadHandler();
+        var cache = new LibraryPhotoImageCache(new MemoryCache(new MemoryCacheOptions()));
+        var service = Service(handler, cache);
+        var revision = DateTime.UnixEpoch;
+        var first = await service.ReadPhotoAsync(7, "album-folder", "drive-id", "image/jpeg", Jpeg.Length, revision, default);
+        var second = await service.ReadPhotoAsync(7, "album-folder", "drive-id", "image/jpeg", Jpeg.Length, revision, default);
+        Assert.NotNull(first); Assert.Equal(Jpeg, first.Content); Assert.Equal(first.ETag, second!.ETag);
+        Assert.Equal(1, handler.Calls);
+        Assert.Equal("https://script.google.com/test", handler.Urls.Single());
+        Assert.Equal("library_read_photo", handler.Payloads.Single().GetProperty("action").GetString());
+        Assert.Equal("album-folder", handler.Payloads.Single().GetProperty("folderId").GetString());
+        Assert.Equal("drive-id", handler.Payloads.Single().GetProperty("fileId").GetString());
+        cache.Invalidate(7, "drive-id", revision);
+        Assert.NotNull(await service.ReadPhotoAsync(7, "album-folder", "drive-id", "image/jpeg", Jpeg.Length, revision, default));
+        Assert.Equal(2, handler.Calls);
+
+        foreach (var corruption in new[] { "failure", "invalid-base64", "mime", "size", "md5", "signature", "oversize" })
+        {
+            var invalid = new ReadHandler { Corruption = corruption };
+            var failed = Service(invalid, new LibraryPhotoImageCache(new MemoryCache(new MemoryCacheOptions())));
+            await Assert.ThrowsAsync<LibraryImageStorageException>(() => failed.ReadPhotoAsync(8, "album-folder", "other-id", "image/jpeg", Jpeg.Length, revision, default));
+            await Assert.ThrowsAsync<LibraryImageStorageException>(() => failed.ReadPhotoAsync(8, "album-folder", "other-id", "image/jpeg", Jpeg.Length, revision, default));
+            Assert.Equal(1, invalid.Calls); // negative cache bounds consecutive Apps Script failures
+        }
+    }
+
+    private static GoogleDriveLibraryStorageService Service(HttpMessageHandler handler, ILibraryPhotoImageCache? cache = null) => new(
         new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> {
             ["GoogleDrive:WebAppUrl"] = "https://script.google.com/test" }).Build(),
-        new ClientFactory(new HttpClient(handler)), NullLogger<GoogleDriveLibraryStorageService>.Instance);
+        new ClientFactory(new HttpClient(handler)), NullLogger<GoogleDriveLibraryStorageService>.Instance,
+        cache ?? new LibraryPhotoImageCache(new MemoryCache(new MemoryCacheOptions())));
     private sealed class ClientFactory(HttpClient client) : IHttpClientFactory { public HttpClient CreateClient(string name) => client; }
+    private sealed class ReadHandler : HttpMessageHandler
+    {
+        public string? Corruption { get; init; }
+        public byte[] Content => Corruption == "signature" ? "<html>"u8.ToArray() :
+            Corruption == "oversize" ? new byte[LibraryUploadRules.MaximumPhotoBytes + 1] : Jpeg;
+        public int Calls { get; private set; }
+        public List<string> Urls { get; } = [];
+        public List<JsonElement> Payloads { get; } = [];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Calls++; Urls.Add(request.RequestUri!.ToString());
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct)); Payloads.Add(body.RootElement.Clone());
+            if (Corruption == "failure") return new(HttpStatusCode.OK) { Content = new StringContent("{\"success\":false,\"code\":\"NOT_FOUND\"}", Encoding.UTF8, "application/json") };
+            var contentType = Corruption == "mime" ? "image/png" : "image/jpeg";
+            var bytes = Content;
+            var checksum = Convert.ToHexString(MD5.HashData(bytes));
+            var encoded = Corruption == "invalid-base64" ? "%%%not-base64%%%" : Convert.ToBase64String(bytes);
+            var size = Corruption == "size" ? bytes.LongLength + 1 : bytes.LongLength;
+            if (Corruption == "md5") checksum = "invalid";
+            var responseJson = JsonSerializer.Serialize(new { success = true, fileId = Payloads[^1].GetProperty("fileId").GetString(), contentType,
+                fileSize = size, md5Checksum = checksum, fileBase64 = encoded });
+            return new(HttpStatusCode.OK) { Content = new StringContent(responseJson, Encoding.UTF8, "application/json") };
+        }
+    }
     private sealed class RecordingHandler : HttpMessageHandler
     {
         public List<JsonElement> Payloads { get; } = [];
