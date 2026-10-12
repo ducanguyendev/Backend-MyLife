@@ -36,6 +36,118 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         Assert.Equal(1, await db.FamilyTrees.CountAsync(t => t.OwnerUserId == b.Id));
         Assert.Equal(a.Id, await db.FamilyMembers.Where(m => m.Id == aId).Select(m => m.FamilyTree.OwnerUserId).SingleAsync());
     }
+
+    [Fact]
+    public async Task Family_map_is_role_protected_tree_scoped_and_uses_persistent_location_cache()
+    {
+        using (var anonymous = await client.GetAsync("/api/family-tree/map")) Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        var admin = await AdminToken();
+        using (var adminResponse = await Send(admin, HttpMethod.Get, "/api/family-tree/map")) Assert.Equal(HttpStatusCode.Forbidden, adminResponse.StatusCode);
+
+        var a = await User(); var b = await User();
+        var aMember = await Create(a.Token, "A member", new() { ["address"] = "Quận 1, TP. Hồ Chí Minh" });
+        var bMember = await Create(b.Token, "B private member", new() { ["address"] = "Hà Nội" });
+        var geocoder = factory.Services.GetRequiredService<TestGeocodingService>();
+        var initialGeocoderCalls = geocoder.Calls;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var cacheA = await db.FamilyMembers.SingleAsync(x => x.Id == aMember);
+            cacheA.Latitude = 10.77; cacheA.Longitude = 106.69; cacheA.GeocodedAddress = cacheA.Address;
+            cacheA.LocationDisplayName = "Ho Chi Minh City, Vietnam"; cacheA.GeocodedAt = DateTime.UtcNow;
+            var cacheB = await db.FamilyMembers.SingleAsync(x => x.Id == bMember);
+            cacheB.Latitude = 21.02; cacheB.Longitude = 105.84; cacheB.GeocodedAddress = cacheB.Address;
+            cacheB.LocationDisplayName = "Hanoi, Vietnam"; cacheB.GeocodedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        using (var mapA = await Send(a.Token, HttpMethod.Get, "/api/family-tree/map"))
+        {
+            Assert.Equal(HttpStatusCode.OK, mapA.StatusCode);
+            var result = (await Body(mapA)).GetProperty("data");
+            Assert.Equal(1, result.GetProperty("totalMembers").GetInt32());
+            Assert.Equal("Ho Chi Minh City, Vietnam", result.GetProperty("locations")[0].GetProperty("displayName").GetString());
+            Assert.Equal(10.8, result.GetProperty("locations")[0].GetProperty("latitude").GetDouble());
+            Assert.Equal(106.7, result.GetProperty("locations")[0].GetProperty("longitude").GetDouble());
+            Assert.Equal(aMember, result.GetProperty("locations")[0].GetProperty("members")[0].GetProperty("id").GetInt32());
+        }
+        using (var mapB = await Send(b.Token, HttpMethod.Get, "/api/family-tree/map"))
+        {
+            var result = (await Body(mapB)).GetProperty("data");
+            Assert.Equal(bMember, result.GetProperty("locations")[0].GetProperty("members")[0].GetProperty("id").GetInt32());
+        }
+        Assert.Equal(initialGeocoderCalls, geocoder.Calls); // unchanged cached addresses must not trigger another lookup
+
+        using (var updated = await Send(a.Token, HttpMethod.Put, $"/api/family-tree/{aMember}", Member("A member", new() { ["address"] = "Đà Nẵng" })))
+            Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var changed = await scope.ServiceProvider.GetRequiredService<AppDbContext>().FamilyMembers.SingleAsync(x => x.Id == aMember);
+            Assert.Null(changed.Latitude); Assert.Null(changed.Longitude); Assert.Null(changed.GeocodedAddress);
+            Assert.Null(changed.LocationDisplayName); Assert.Null(changed.GeocodedAt);
+        }
+
+        var withoutAddress = await User();
+        await Create(withoutAddress.Token, "No address");
+        using (var noAddressMap = await Send(withoutAddress.Token, HttpMethod.Get, "/api/family-tree/map"))
+        {
+            Assert.Equal(HttpStatusCode.OK, noAddressMap.StatusCode);
+            Assert.Equal(0, (await Body(noAddressMap)).GetProperty("data").GetProperty("pendingGeocodingMembers").GetInt32());
+        }
+        Assert.Equal(initialGeocoderCalls, geocoder.Calls);
+    }
+
+    [Fact]
+    public async Task Family_map_returns_without_waiting_for_geocoding_and_caches_success_and_failure()
+    {
+        var user = await User();
+        var geocoder = factory.Services.GetRequiredService<TestGeocodingService>();
+        var initialGeocoderCalls = geocoder.Calls;
+        var locatedId = await Create(user.Token, "Locatable", new() { ["address"] = "Quận 1, TP. Hồ Chí Minh" });
+        using (var first = await Send(user.Token, HttpMethod.Get, "/api/family-tree/map"))
+        {
+            Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+            Assert.Equal(1, (await Body(first)).GetProperty("data").GetProperty("pendingGeocodingMembers").GetInt32());
+        }
+        var found = await WaitForGeocodeAsync(locatedId);
+        Assert.NotNull(found.Latitude); Assert.Equal("Ho Chi Minh City, Vietnam", found.LocationDisplayName);
+        using (var cached = await Send(user.Token, HttpMethod.Get, "/api/family-tree/map"))
+        {
+            var result = (await Body(cached)).GetProperty("data");
+            Assert.Equal(1, result.GetProperty("locatedMembers").GetInt32());
+            Assert.Equal(0, result.GetProperty("pendingGeocodingMembers").GetInt32());
+        }
+
+        var unresolvedId = await Create(user.Token, "Unresolved", new() { ["address"] = "unresolved address" });
+        using (var first = await Send(user.Token, HttpMethod.Get, "/api/family-tree/map"))
+        {
+            Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+            Assert.Equal(1, (await Body(first)).GetProperty("data").GetProperty("pendingGeocodingMembers").GetInt32());
+        }
+        var failed = await WaitForGeocodeAsync(unresolvedId);
+        Assert.Null(failed.Latitude); Assert.Null(failed.Longitude);
+        using (var cachedFailure = await Send(user.Token, HttpMethod.Get, "/api/family-tree/map"))
+        {
+            var result = (await Body(cachedFailure)).GetProperty("data");
+            Assert.Equal(2, result.GetProperty("totalMembers").GetInt32());
+            Assert.Equal(1, result.GetProperty("locatedMembers").GetInt32());
+            Assert.Equal(0, result.GetProperty("pendingGeocodingMembers").GetInt32());
+        }
+        Assert.Equal(initialGeocoderCalls + 2, geocoder.Calls);
+
+        async Task<MyLife.Shared.Entities.FamilyMember> WaitForGeocodeAsync(int memberId)
+        {
+            var until = DateTime.UtcNow.AddSeconds(25);
+            while (DateTime.UtcNow < until)
+            {
+                await using var scope = factory.Services.CreateAsyncScope();
+                var value = await scope.ServiceProvider.GetRequiredService<AppDbContext>().FamilyMembers.AsNoTracking().SingleAsync(x => x.Id == memberId);
+                if (value.GeocodedAt is not null) return value;
+                await Task.Delay(50);
+            }
+            throw new TimeoutException("Background family map geocoding did not finish.");
+        }
+    }
     [Fact]
     public async Task Foreign_parent_spouse_child_and_horizontal_references_are_rejected_on_create_and_update()
     {
@@ -82,6 +194,72 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         Assert.Equal(bMember, Assert.Single(await List(b.Token)).GetProperty("id").GetInt32());
         await using var scope = factory.Services.CreateAsyncScope();
         Assert.False(await scope.ServiceProvider.GetRequiredService<AppDbContext>().FamilyRelationships.AnyAsync(r => r.Member1Id == parent || r.Member2Id == parent));
+    }
+
+    [Fact]
+    public async Task Anniversary_crud_is_role_protected_and_scoped_to_the_owners_tree()
+    {
+        var a = await User(); var b = await User();
+        var aMember = await Create(a.Token, "Ancestor A"); var bMember = await Create(b.Token, "Ancestor B");
+        using (var anonymous = await client.GetAsync("/api/family-tree/anniversaries")) Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        var admin = await AdminToken();
+        using (var adminResponse = await Send(admin, HttpMethod.Get, "/api/family-tree/anniversaries")) Assert.Equal(HttpStatusCode.Forbidden, adminResponse.StatusCode);
+
+        var payload = Anniversary("Ancestor A memorial", aMember);
+        using var created = await Send(a.Token, HttpMethod.Post, "/api/family-tree/anniversaries", payload);
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var item = (await Body(created)).GetProperty("data");
+        var id = item.GetProperty("id").GetInt64();
+        Assert.Equal(aMember, item.GetProperty("relatedMemberId").GetInt32());
+        Assert.True(item.GetProperty("daysUntil").GetInt32() >= 0);
+
+        using (var listA = await Send(a.Token, HttpMethod.Get, "/api/family-tree/anniversaries"))
+            Assert.Equal(id, (await Body(listA)).GetProperty("data").EnumerateArray().Single().GetProperty("id").GetInt64());
+        using (var listB = await Send(b.Token, HttpMethod.Get, "/api/family-tree/anniversaries"))
+            Assert.Empty((await Body(listB)).GetProperty("data").EnumerateArray());
+        foreach (var (method, body) in new[] { (HttpMethod.Get, (object?)null), (HttpMethod.Put, Anniversary("Tampered", bMember)), (HttpMethod.Delete, null) })
+        {
+            using var denied = await Send(b.Token, method, $"/api/family-tree/anniversaries/{id}", body);
+            Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
+        }
+        using (var foreignMember = await Send(a.Token, HttpMethod.Post, "/api/family-tree/anniversaries", Anniversary("Wrong tree", bMember)))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, foreignMember.StatusCode);
+            Assert.Equal("FAMILY_MEMBER_NOT_FOUND", (await Body(foreignMember)).GetProperty("code").GetString());
+        }
+        using (var invalid = await Send(a.Token, HttpMethod.Post, "/api/family-tree/anniversaries", Anniversary("x", null)))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+            Assert.Equal("FAMILY_ANNIVERSARY_INVALID_TITLE", (await Body(invalid)).GetProperty("code").GetString());
+        }
+        using (var updated = await Send(a.Token, HttpMethod.Put, $"/api/family-tree/anniversaries/{id}", Anniversary("Updated ancestor", aMember)))
+        {
+            Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+            Assert.Equal("Updated ancestor", (await Body(updated)).GetProperty("data").GetProperty("title").GetString());
+        }
+        using (var memberDeleted = await Send(a.Token, HttpMethod.Delete, $"/api/family-tree/{aMember}")) Assert.Equal(HttpStatusCode.OK, memberDeleted.StatusCode);
+        using (var afterMemberDelete = await Send(a.Token, HttpMethod.Get, $"/api/family-tree/anniversaries/{id}"))
+            Assert.Equal(JsonValueKind.Null, (await Body(afterMemberDelete)).GetProperty("data").GetProperty("relatedMemberId").ValueKind);
+        using (var deleted = await Send(a.Token, HttpMethod.Delete, $"/api/family-tree/anniversaries/{id}")) Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+        using var missing = await Send(a.Token, HttpMethod.Get, $"/api/family-tree/anniversaries/{id}");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    private static Dictionary<string, object?> Anniversary(string title, int? memberId) => new()
+    {
+        ["eventType"] = "DEATH_ANNIVERSARY", ["title"] = title, ["relatedMemberId"] = memberId,
+        ["lunarDay"] = 1, ["lunarMonth"] = 1, ["isLeapMonth"] = false,
+        ["place"] = "", ["host"] = null, ["notes"] = null
+    };
+
+    private async Task<string> AdminToken()
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/login")
+        { Content = JsonContent.Create(new { email = "integration.admin@gmail.com", password = "Admin_Test!234567" }) };
+        request.Headers.Add("X-Client-Platform", "mobile");
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await Body(response)).GetProperty("accessToken").GetString()!;
     }
     private static Dictionary<string, object?> Member(string name, Dictionary<string, object?>? fields = null)
     {

@@ -20,6 +20,7 @@ namespace MyLife.Shared.Data
         public DbSet<FamilyTree> FamilyTrees => Set<FamilyTree>();
         public DbSet<FamilyMember> FamilyMembers => Set<FamilyMember>();
         public DbSet<FamilyRelationship> FamilyRelationships => Set<FamilyRelationship>();
+        public DbSet<FamilyAnniversary> FamilyAnniversaries => Set<FamilyAnniversary>();
         public DbSet<Generation> Generations => Set<Generation>();
         public DbSet<LibraryAlbum> LibraryAlbums => Set<LibraryAlbum>();
         public DbSet<LibraryPhoto> LibraryPhotos => Set<LibraryPhoto>();
@@ -199,6 +200,30 @@ namespace MyLife.Shared.Data
                 entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
                 entity.HasIndex(e => e.OwnerUserId).IsUnique();
                 entity.HasOne(e => e.OwnerUser).WithMany().HasForeignKey(e => e.OwnerUserId).OnDelete(DeleteBehavior.Restrict);
+            });
+
+            modelBuilder.Entity<FamilyAnniversary>(entity =>
+            {
+                entity.ToTable("family_anniversaries");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedOnAdd();
+                entity.Property(e => e.FamilyTreeId).HasColumnName("family_tree_id").IsRequired();
+                entity.Property(e => e.RelatedMemberId).HasColumnName("related_member_id");
+                entity.Property(e => e.EventType).HasColumnName("event_type").HasMaxLength(32).IsRequired();
+                entity.Property(e => e.Title).HasColumnName("title").HasMaxLength(200).IsRequired();
+                entity.Property(e => e.LunarDay).HasColumnName("lunar_day").IsRequired();
+                entity.Property(e => e.LunarMonth).HasColumnName("lunar_month").IsRequired();
+                entity.Property(e => e.IsLeapMonth).HasColumnName("is_leap_month").HasDefaultValue(false).IsRequired();
+                entity.Property(e => e.Place).HasColumnName("place").HasMaxLength(500);
+                entity.Property(e => e.Host).HasColumnName("host").HasMaxLength(300);
+                entity.Property(e => e.Notes).HasColumnName("notes").HasMaxLength(2000);
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.HasIndex(e => e.FamilyTreeId);
+                entity.HasIndex(e => new { e.FamilyTreeId, e.LunarMonth, e.LunarDay });
+                entity.HasIndex(e => e.RelatedMemberId);
+                entity.HasOne(e => e.FamilyTree).WithMany(e => e.Anniversaries).HasForeignKey(e => e.FamilyTreeId).OnDelete(DeleteBehavior.Cascade);
+                entity.HasOne(e => e.RelatedMember).WithMany(e => e.Anniversaries).HasForeignKey(e => e.RelatedMemberId).OnDelete(DeleteBehavior.SetNull);
             });
 
             // 6. Table FAMILY_MEMBERS

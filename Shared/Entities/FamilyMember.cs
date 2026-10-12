@@ -35,6 +35,23 @@ namespace MyLife.Shared.Entities
         [MaxLength(255)]
         public string? Address { get; set; }
 
+        [Column("latitude", TypeName = "double precision")]
+        public double? Latitude { get; set; }
+
+        [Column("longitude", TypeName = "double precision")]
+        public double? Longitude { get; set; }
+
+        [Column("geocoded_address")]
+        [MaxLength(500)]
+        public string? GeocodedAddress { get; set; }
+
+        [Column("location_display_name")]
+        [MaxLength(500)]
+        public string? LocationDisplayName { get; set; }
+
+        [Column("geocoded_at", TypeName = "timestamp with time zone")]
+        public DateTime? GeocodedAt { get; set; }
+
         [Column("phone_number")]
         [MaxLength(20)]
         public string? PhoneNumber { get; set; }
@@ -98,5 +115,7 @@ namespace MyLife.Shared.Entities
 
         [InverseProperty("Member2")]
         public virtual ICollection<FamilyRelationship> RelationsAsMember2 { get; set; } = new List<FamilyRelationship>();
+
+        public virtual ICollection<FamilyAnniversary> Anniversaries { get; set; } = new List<FamilyAnniversary>();
     }
 }

@@ -11,12 +11,14 @@ namespace MyLife.Features.FamilyTree.Controllers;
 [ApiController]
 [Route("api/family-tree")]
 [Authorize(Roles = AppRoles.User)]
-public sealed class FamilyTreeController(IFamilyTreeService service, ICurrentUserService currentUser) : ControllerBase
+public sealed class FamilyTreeController(IFamilyTreeService service, ICurrentUserService currentUser, FamilyMapService? mapService = null) : ControllerBase
 {
     [HttpGet]
     public Task<IActionResult> GetAll() => Run(async (userId, ct) => Ok(new { success = true, data = await service.GetAllMembersAsync(userId, ct) }));
     [HttpGet("generations")]
     public Task<IActionResult> Generations() => Run(async (_, ct) => Ok(new { success = true, data = await service.GetAllGenerationsAsync(ct) }));
+    [HttpGet("map")]
+    public Task<IActionResult> Map() => Run(async (userId, ct) => Ok(new { success = true, data = await mapService!.GetMapAsync(userId, ct) }));
     [HttpGet("{id:int}")]
     public Task<IActionResult> Get(int id) => Run(async (userId, ct) =>
     {

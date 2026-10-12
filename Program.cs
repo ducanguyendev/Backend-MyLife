@@ -76,6 +76,19 @@ builder.Services.AddScoped<IGoogleCredentialVerifier, GoogleCredentialVerifier>(
 builder.Services.AddScoped<IGoogleDriveAvatarService, GoogleDriveAvatarService>();
 builder.Services.AddScoped<IGoogleAvatarSyncService, GoogleAvatarSyncService>();
 builder.Services.AddScoped<IFamilyTreeService, FamilyTreeService>();
+builder.Services.Configure<GeocodingOptions>(builder.Configuration.GetSection("Geocoding"));
+builder.Services.AddHttpClient<IGeocodingService, NominatimGeocodingService>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(8);
+    client.DefaultRequestHeaders.UserAgent.ParseAdd(builder.Configuration["Geocoding:UserAgent"] ?? "MyLife/1.0");
+});
+builder.Services.AddSingleton<FamilyLocationGeocodingQueue>();
+builder.Services.AddSingleton<IFamilyLocationGeocodingQueue>(provider => provider.GetRequiredService<FamilyLocationGeocodingQueue>());
+builder.Services.AddHostedService(provider => provider.GetRequiredService<FamilyLocationGeocodingQueue>());
+builder.Services.AddScoped<FamilyMapService>();
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<VietnameseLunarCalendarService>();
+builder.Services.AddScoped<IFamilyAnniversaryService, FamilyAnniversaryService>();
 builder.Services.AddMemoryCache(options => options.SizeLimit = 64L * 1024 * 1024);
 builder.Services.AddSingleton<IMemberAvatarImageCache, MemberAvatarImageCache>();
 builder.Services.AddSingleton<ILibraryPhotoImageCache, LibraryPhotoImageCache>();

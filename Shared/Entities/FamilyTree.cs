@@ -8,4 +8,5 @@ public sealed class FamilyTree
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public ICollection<FamilyMember> Members { get; set; } = new List<FamilyMember>();
+    public ICollection<FamilyAnniversary> Anniversaries { get; set; } = new List<FamilyAnniversary>();
 }

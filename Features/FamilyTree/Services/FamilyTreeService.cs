@@ -63,6 +63,12 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
         var member = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == id && x.FamilyTreeId == tree.Id, ct) ?? throw new KeyNotFoundException();
         await ValidateReferencesAsync(tree.Id, id, dto.FatherId, dto.MotherId, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, dto.Gender, ct);
         member.FullName = dto.FullName.Trim(); member.Generation = dto.Generation; member.Gender = dto.Gender; member.DateOfBirth = dto.DateOfBirth; member.Role = dto.Role;
+        var nextAddress = dto.Address?.Trim();
+        if (!string.Equals(member.Address?.Trim(), nextAddress, StringComparison.Ordinal))
+        {
+            member.Latitude = null; member.Longitude = null; member.GeocodedAddress = null;
+            member.LocationDisplayName = null; member.GeocodedAt = null;
+        }
         member.Address = dto.Address; member.PhoneNumber = dto.PhoneNumber; member.FacebookUrl = dto.FacebookUrl; member.InstagramUrl = dto.InstagramUrl; member.Biography = dto.Biography;
         member.FatherId = dto.FatherId; member.MotherId = dto.MotherId; member.UpdatedAt = DateTime.UtcNow;
         await SynchronizeRelationsAsync(member, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, ct);

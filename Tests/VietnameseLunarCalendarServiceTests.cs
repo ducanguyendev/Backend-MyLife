@@ -1,0 +1,50 @@
+using MyLife.Features.FamilyTree.Services;
+using Xunit;
+
+public sealed class VietnameseLunarCalendarServiceTests
+{
+    private readonly VietnameseLunarCalendarService calendar = new(TimeProvider.System);
+
+    [Theory]
+    [InlineData(1, 1, 2024, false, "2024-02-10")]
+    [InlineData(1, 1, 2025, false, "2025-01-29")]
+    [InlineData(1, 2, 2023, true, "2023-03-22")]
+    [InlineData(30, 2, 2024, false, "2024-04-08")]
+    public void Converts_known_vietnamese_lunar_dates(int day, int month, int year, bool leap, string expected)
+    {
+        Assert.Equal(DateOnly.Parse(expected), calendar.ConvertLunarToSolar(day, month, year, leap));
+    }
+
+    [Theory]
+    [InlineData(30, 1, 2024, false)]
+    [InlineData(1, 2, 2024, true)]
+    [InlineData(0, 1, 2024, false)]
+    public void Rejects_lunar_dates_that_do_not_exist(int day, int month, int year, bool leap) =>
+        Assert.Throws<ArgumentException>(() => calendar.ConvertLunarToSolar(day, month, year, leap));
+
+    [Fact]
+    public void Next_occurrence_includes_today_and_calculates_countdown()
+    {
+        var (today, todayDays) = calendar.NextOccurrence(1, 1, false, new DateOnly(2024, 2, 10));
+        var (next, nextDays) = calendar.NextOccurrence(1, 1, false, new DateOnly(2024, 2, 11));
+        Assert.Equal(new DateOnly(2024, 2, 10), today);
+        Assert.Equal(0, todayDays);
+        Assert.Equal(new DateOnly(2025, 1, 29), next);
+        Assert.Equal(353, nextDays);
+    }
+
+    [Fact]
+    public void Next_leap_month_occurrence_skips_years_without_that_leap_month()
+    {
+        DateOnly? expected = null;
+        for (var year = 2024; year <= 2044 && expected is null; year++)
+        {
+            try { expected = calendar.ConvertLunarToSolar(1, 2, year, true); }
+            catch (ArgumentException) { }
+        }
+        Assert.NotNull(expected);
+        var (date, daysUntil) = calendar.NextOccurrence(1, 2, true, new DateOnly(2024, 1, 1));
+        Assert.Equal(expected, date);
+        Assert.Equal(date.DayNumber - new DateOnly(2024, 1, 1).DayNumber, daysUntil);
+    }
+}

@@ -16,6 +16,7 @@ using MyLife.Shared.Data;
 using MyLife.Features.Auth.Services;
 using MyLife.Features.Avatar.Services;
 using MyLife.Features.Library.Services;
+using MyLife.Features.FamilyTree.Services;
 using Npgsql;
 using Xunit;
 
@@ -71,12 +72,29 @@ public class MyLifeFactory : WebApplicationFactory<Program>
             services.RemoveAll<ILibraryStorageService>();
             services.AddSingleton<TestLibraryStorage>();
             services.AddSingleton<ILibraryStorageService>(provider => provider.GetRequiredService<TestLibraryStorage>());
+            services.RemoveAll<IGeocodingService>();
+            services.AddSingleton<TestGeocodingService>();
+            services.AddSingleton<IGeocodingService>(provider => provider.GetRequiredService<TestGeocodingService>());
             services.AddSingleton<LibraryPersistenceFailureInterceptor>();
             services.AddDbContext<AppDbContext>((provider, options) =>
                 options.AddInterceptors(provider.GetRequiredService<LibraryPersistenceFailureInterceptor>()));
             services.AddHttpClient(nameof(GoogleAvatarSyncService))
                 .ConfigurePrimaryHttpMessageHandler(() => new TestGoogleImageHandler());
         });
+    }
+}
+
+public sealed class TestGeocodingService : IGeocodingService
+{
+    private int calls;
+    public int Calls => Volatile.Read(ref calls);
+    public Task<GeocodingResult?> GeocodeAsync(string address, CancellationToken cancellationToken)
+    {
+        Interlocked.Increment(ref calls);
+        GeocodingResult? result = address.Contains("unresolved", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : new GeocodingResult(10.77, 106.69, "Ho Chi Minh City, Vietnam");
+        return Task.FromResult(result);
     }
 }
 

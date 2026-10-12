@@ -22,6 +22,87 @@ namespace MyLife.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("MyLife.Shared.Entities.FamilyAnniversary", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("event_type");
+
+                    b.Property<long>("FamilyTreeId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("family_tree_id");
+
+                    b.Property<string>("Host")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("host");
+
+                    b.Property<bool>("IsLeapMonth")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_leap_month");
+
+                    b.Property<int>("LunarDay")
+                        .HasColumnType("integer")
+                        .HasColumnName("lunar_day");
+
+                    b.Property<int>("LunarMonth")
+                        .HasColumnType("integer")
+                        .HasColumnName("lunar_month");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)")
+                        .HasColumnName("notes");
+
+                    b.Property<string>("Place")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("place");
+
+                    b.Property<int?>("RelatedMemberId")
+                        .HasColumnType("integer")
+                        .HasColumnName("related_member_id");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("title");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("FamilyTreeId");
+
+                    b.HasIndex("RelatedMemberId");
+
+                    b.HasIndex("FamilyTreeId", "LunarMonth", "LunarDay");
+
+                    b.ToTable("family_anniversaries", (string)null);
+                });
+
             modelBuilder.Entity("MyLife.Shared.Entities.FamilyMember", b =>
                 {
                     b.Property<int>("Id")
@@ -85,10 +166,32 @@ namespace MyLife.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("generation");
 
+                    b.Property<string>("GeocodedAddress")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("geocoded_address");
+
+                    b.Property<DateTime?>("GeocodedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("geocoded_at");
+
                     b.Property<string>("InstagramUrl")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)")
                         .HasColumnName("instagram_url");
+
+                    b.Property<double?>("Latitude")
+                        .HasColumnType("double precision")
+                        .HasColumnName("latitude");
+
+                    b.Property<string>("LocationDisplayName")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("location_display_name");
+
+                    b.Property<double?>("Longitude")
+                        .HasColumnType("double precision")
+                        .HasColumnName("longitude");
 
                     b.Property<int?>("MotherId")
                         .HasColumnType("integer")
@@ -693,6 +796,24 @@ namespace MyLife.Migrations
                     b.ToTable("user_roles", (string)null);
                 });
 
+            modelBuilder.Entity("MyLife.Shared.Entities.FamilyAnniversary", b =>
+                {
+                    b.HasOne("MyLife.Shared.Entities.FamilyTree", "FamilyTree")
+                        .WithMany("Anniversaries")
+                        .HasForeignKey("FamilyTreeId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("MyLife.Shared.Entities.FamilyMember", "RelatedMember")
+                        .WithMany("Anniversaries")
+                        .HasForeignKey("RelatedMemberId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("FamilyTree");
+
+                    b.Navigation("RelatedMember");
+                });
+
             modelBuilder.Entity("MyLife.Shared.Entities.FamilyMember", b =>
                 {
                     b.HasOne("MyLife.Shared.Entities.FamilyTree", "FamilyTree")
@@ -837,6 +958,8 @@ namespace MyLife.Migrations
 
             modelBuilder.Entity("MyLife.Shared.Entities.FamilyMember", b =>
                 {
+                    b.Navigation("Anniversaries");
+
                     b.Navigation("ChildrenAsFather");
 
                     b.Navigation("ChildrenAsMother");
@@ -848,6 +971,8 @@ namespace MyLife.Migrations
 
             modelBuilder.Entity("MyLife.Shared.Entities.FamilyTree", b =>
                 {
+                    b.Navigation("Anniversaries");
+
                     b.Navigation("Members");
                 });
 
