@@ -10,6 +10,9 @@ public interface IFamilyTreeService
     Task<FamilyMemberDto?> GetMemberByIdAsync(int userId, int memberId, CancellationToken ct);
     Task<FamilyMemberDto> CreateMemberAsync(int userId, CreateFamilyMemberDto dto, CancellationToken ct);
     Task<FamilyMemberDto> UpdateMemberAsync(int userId, int memberId, UpdateFamilyMemberDto dto, CancellationToken ct);
+    Task<FamilyMemberDto> UploadMemberAvatarAsync(int userId, int memberId, byte[] content, string contentType, CancellationToken ct);
+    Task<FamilyMemberDto> DeleteMemberAvatarAsync(int userId, int memberId, CancellationToken ct);
+    Task<MemberAvatarImageResult?> GetMemberAvatarImageAsync(int userId, int memberId, CancellationToken ct);
     Task<bool> DeleteMemberAsync(int userId, int memberId, CancellationToken ct);
     Task<IEnumerable<GenerationDto>> GetAllGenerationsAsync(CancellationToken ct);
 }

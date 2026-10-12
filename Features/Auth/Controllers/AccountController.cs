@@ -56,18 +56,18 @@ public sealed class AccountController : ControllerBase
     public async Task<IActionResult> Register([FromBody] RegisterViewModel model)
     {
         if (!ModelState.IsValid) return ValidationProblem(ModelState);
-        if (model.Password != model.ConfirmPassword) return BadRequest(Error("Passwords do not match."));
-        if (Encoding.UTF8.GetByteCount(model.Password) > 72) return BadRequest(Error("Password must not exceed 72 UTF-8 bytes."));
+        if (model.Password != model.ConfirmPassword) return BadRequest(Error("AUTH_PASSWORD_MISMATCH", "Passwords do not match."));
+        if (Encoding.UTF8.GetByteCount(model.Password) > 72) return BadRequest(Error("AUTH_PASSWORD_TOO_LONG", "Password must not exceed 72 UTF-8 bytes."));
         var email = NormalizeEmail(model.Email);
-        if (!email.EndsWith("@gmail.com", StringComparison.Ordinal)) return BadRequest(Error("Only Gmail addresses are supported."));
-        if (await _db.Users.AnyAsync(x => x.Email == email)) return Conflict(Error("This email is already registered."));
+        if (!email.EndsWith("@gmail.com", StringComparison.Ordinal)) return BadRequest(Error("AUTH_GMAIL_REQUIRED", "Only Gmail addresses are supported."));
+        if (await _db.Users.AnyAsync(x => x.Email == email)) return Conflict(Error("AUTH_EMAIL_ALREADY_REGISTERED", "This email is already registered."));
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
-        if (!model.DateOfBirth.HasValue || model.DateOfBirth > today) return BadRequest(Error("Date of birth is invalid."));
+        if (!model.DateOfBirth.HasValue || model.DateOfBirth > today) return BadRequest(Error("AUTH_DOB_INVALID", "Date of birth is invalid."));
         var age = today.Year - model.DateOfBirth.Value.Year;
         if (model.DateOfBirth.Value > today.AddYears(-age)) age--;
-        if (age is < 6 or > 120) return BadRequest(Error("Date of birth is invalid."));
+        if (age is < 6 or > 120) return BadRequest(Error("AUTH_DOB_INVALID", "Date of birth is invalid."));
         var role = await _db.Roles.SingleOrDefaultAsync(r => r.Name == AppRoles.User);
-        if (role is null) return StatusCode(503, Error("The service has not been initialized."));
+        if (role is null) return StatusCode(503, Error("AUTH_SERVICE_NOT_INITIALIZED", "The service has not been initialized."));
         var user = new AppUser { Email = email, PasswordHash = BCrypt.Net.BCrypt.HashPassword(model.Password, workFactor: 11), FullName = model.FullName.Trim(),
             PhoneNumber = model.PhoneNumber.Trim(), Gender = model.Gender.Trim(), DateOfBirth = model.DateOfBirth, AuthProvider = 0, HasLocalProvider = true, IsActive = true,
             VerifiedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
@@ -289,6 +289,7 @@ public sealed class AccountController : ControllerBase
     private static string PrimaryRole(AppUser user) => user.UserRoles.Any(x => x.Role.Name == AppRoles.Admin) ? AppRoles.Admin : AppRoles.User;
     private static string HashRefreshToken(string raw) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)));
     private static object Error(string message) => new { success = false, message };
+    private static object Error(string code, string message) => new { success = false, code, message };
     private int AccessSeconds => _configuration.GetValue<int>("JwtSettings:AccessTokenSeconds"); private int RefreshMinutes => _configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes");
     private object ToUserDto(AppUser user) => new { id = user.Id, email = user.Email, fullName = user.FullName, name = string.IsNullOrWhiteSpace(user.FullName) ? user.Email.Split('@')[0] : user.FullName, phoneNumber = user.PhoneNumber, gender = user.Gender, dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"), avatarUrl = user.AvatarUrl, role = PrimaryRole(user), roles = new[] { PrimaryRole(user) }, authProvider = user.AuthProvider, authProviderName = user.AuthProvider == 1 ? "GOOGLE" : "LOCAL", loginProviders = new { local = user.HasLocalProvider, google = user.HasGoogleProvider }, isActive = user.IsActive, verifiedAt = user.VerifiedAt, createdAt = user.CreatedAt, updatedAt = user.UpdatedAt };
     private void SetAuthCookies(string access, string refresh)

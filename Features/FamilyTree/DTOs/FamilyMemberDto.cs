@@ -22,6 +22,7 @@ namespace MyLife.Features.FamilyTree.DTOs
         public string? FacebookUrl { get; set; }
         public string? InstagramUrl { get; set; }
         public string? AvatarUrl { get; set; }
+        public bool HasManagedAvatar { get; set; }
         public string? Biography { get; set; }
         
         public int? FatherId { get; set; }

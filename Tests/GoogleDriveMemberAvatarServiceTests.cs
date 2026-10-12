@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging.Abstractions;
 using MyLife.Features.FamilyTree.Services;
 using Xunit;
@@ -114,6 +115,76 @@ public sealed class GoogleDriveMemberAvatarServiceTests
     }
 
     [Fact]
+    public async Task Image_fetch_is_cached_and_returns_validated_image_bytes()
+    {
+        var handler = new ImageHandler(); var service = CreateImageService(handler);
+        var first = await service.GetAvatarAsync(15, "X", DateTime.UnixEpoch);
+        var second = await service.GetAvatarAsync(15, "X", DateTime.UnixEpoch);
+        Assert.NotNull(first); Assert.Equal("image/jpeg", first.ContentType);
+        Assert.Equal(new byte[] { 255, 216, 255, 0 }, first.Content);
+        Assert.Equal(first.ETag, second!.ETag); Assert.Equal(1, handler.Calls);
+        Assert.Equal($"https://lh3.googleusercontent.com/d/X?v={DateTime.UnixEpoch.Ticks}", handler.LastUrl);
+    }
+
+    [Fact]
+    public async Task Replaced_image_revision_bypasses_upstream_cdn_and_server_cache()
+    {
+        var handler = new ImageHandler(); var service = CreateImageService(handler);
+        var firstVersion = DateTime.UnixEpoch;
+        var secondVersion = firstVersion.AddMilliseconds(1);
+        var first = await service.GetAvatarAsync(15, "X", firstVersion);
+
+        handler.Content = [255, 216, 255, 9];
+        var replaced = await service.GetAvatarAsync(15, "X", secondVersion);
+        var cachedReplacement = await service.GetAvatarAsync(15, "X", secondVersion);
+
+        Assert.NotNull(first); Assert.NotNull(replaced);
+        Assert.NotEqual(first.ETag, replaced.ETag);
+        Assert.Equal(new byte[] { 255, 216, 255, 9 }, replaced.Content);
+        Assert.Equal(replaced.ETag, cachedReplacement!.ETag);
+        Assert.Equal(2, handler.Calls);
+        Assert.Equal($"https://lh3.googleusercontent.com/d/X?v={firstVersion.Ticks}", handler.RequestedUrls[0]);
+        Assert.Equal($"https://lh3.googleusercontent.com/d/X?v={secondVersion.Ticks}", handler.RequestedUrls[1]);
+    }
+
+    [Fact]
+    public async Task Explicit_invalidation_allows_replaced_or_deleted_avatar_to_be_fetched_again()
+    {
+        var handler = new ImageHandler();
+        var cache = new MemberAvatarImageCache(new MemoryCache(new MemoryCacheOptions()));
+        var service = new GoogleDriveMemberAvatarService(new ConfigurationBuilder().Build(), new SingleClientFactory(new HttpClient(handler)),
+            NullLogger<GoogleDriveMemberAvatarService>.Instance, cache);
+        var version = DateTime.UnixEpoch;
+        Assert.NotNull(await service.GetAvatarAsync(15, "X", version));
+        cache.Invalidate(15, "X", version);
+        Assert.NotNull(await service.GetAvatarAsync(15, "X", version));
+        Assert.Equal(2, handler.Calls);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests, "image/jpeg", 4)]
+    [InlineData(HttpStatusCode.OK, "text/html", 4)]
+    [InlineData(HttpStatusCode.OK, "image/svg+xml", 4)]
+    [InlineData(HttpStatusCode.OK, "image/jpeg", 5 * 1024 * 1024 + 1)]
+    public async Task Invalid_or_failed_upstream_is_rejected_and_negative_cached(HttpStatusCode status, string contentType, int length)
+    {
+        var handler = new ImageHandler { Status = status, ContentType = contentType, Content = new byte[length] };
+        handler.Content[0] = 255;
+        var service = CreateImageService(handler);
+        Assert.Null(await service.GetAvatarAsync(15, "X", DateTime.UnixEpoch));
+        Assert.Null(await service.GetAvatarAsync(15, "X", DateTime.UnixEpoch));
+        Assert.Equal(1, handler.Calls);
+    }
+
+    [Fact]
+    public async Task Invalid_file_identity_does_not_request_upstream()
+    {
+        var handler = new ImageHandler(); var service = CreateImageService(handler);
+        Assert.Null(await service.GetAvatarAsync(15, "../X", DateTime.UnixEpoch));
+        Assert.Equal(0, handler.Calls);
+    }
+
+    [Fact]
     public async Task Transport_failure_and_missing_configuration_fail_safely()
     {
         foreach (var handler in new[] { new RecordingHandler { FailHttp = true }, new RecordingHandler { FailTransport = true } })
@@ -128,7 +199,12 @@ public sealed class GoogleDriveMemberAvatarServiceTests
 
     private static GoogleDriveMemberAvatarService Create(RecordingHandler handler, string url = "https://script.google.com/test") => new(
         new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["GoogleDrive:WebAppUrl"] = url }).Build(),
-        new SingleClientFactory(new HttpClient(handler)), NullLogger<GoogleDriveMemberAvatarService>.Instance);
+        new SingleClientFactory(new HttpClient(handler)), NullLogger<GoogleDriveMemberAvatarService>.Instance,
+        new MemberAvatarImageCache(new MemoryCache(new MemoryCacheOptions())));
+
+    private static GoogleDriveMemberAvatarService CreateImageService(ImageHandler handler) => new(
+        new ConfigurationBuilder().Build(), new SingleClientFactory(new HttpClient(handler)), NullLogger<GoogleDriveMemberAvatarService>.Instance,
+        new MemberAvatarImageCache(new MemoryCache(new MemoryCacheOptions())));
 
     private sealed class SingleClientFactory(HttpClient client) : IHttpClientFactory
     {
@@ -160,6 +236,23 @@ public sealed class GoogleDriveMemberAvatarServiceTests
             if (ReplaceField is not null) response[ReplaceField] = ReplaceValue;
             return new HttpResponseMessage(FailHttp ? HttpStatusCode.BadGateway : HttpStatusCode.OK) {
                 Content = new StringContent(ResponseJson ?? JsonSerializer.Serialize(response), Encoding.UTF8, "application/json") };
+        }
+    }
+
+    private sealed class ImageHandler : HttpMessageHandler
+    {
+        public int Calls { get; private set; }
+        public string? LastUrl { get; private set; }
+        public List<string?> RequestedUrls { get; } = [];
+        public HttpStatusCode Status { get; init; } = HttpStatusCode.OK;
+        public string ContentType { get; init; } = "image/jpeg";
+        public byte[] Content { get; set; } = [255, 216, 255, 0];
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Calls++; LastUrl = request.RequestUri?.ToString();
+            RequestedUrls.Add(LastUrl);
+            return Task.FromResult(new HttpResponseMessage(Status) { Content = new ByteArrayContent(Content) {
+                Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(ContentType) } } });
         }
     }
 }

@@ -50,6 +50,10 @@ namespace MyLife.Shared.Entities
         [Column("avatar_url")]
         public string? AvatarUrl { get; set; }
 
+        [Column("avatar_drive_file_id")]
+        [MaxLength(255)]
+        public string? AvatarDriveFileId { get; set; }
+
         [Column("biography")]
         public string? Biography { get; set; }
 

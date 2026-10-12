@@ -36,6 +36,35 @@ builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
             .Where(entry => entry.Value?.Errors.Count > 0)
             .ToDictionary(entry => entry.Key, entry => entry.Value!.Errors.Select(error => string.IsNullOrWhiteSpace(error.ErrorMessage) ? "Invalid value." : error.ErrorMessage));
         var message = errors.Values.SelectMany(x => x).FirstOrDefault() ?? "Request validation failed.";
+        if (context.HttpContext.Request.Method == "POST" &&
+            context.HttpContext.Request.Path.Equals("/api/auth/register", StringComparison.OrdinalIgnoreCase))
+        {
+            string Attempted(string key) => context.ModelState.TryGetValue(key, out var entry) ? entry.AttemptedValue ?? string.Empty : string.Empty;
+            string? code = null;
+            string? codedMessage = null;
+            if (!string.IsNullOrWhiteSpace(Attempted("ConfirmPassword")) &&
+                !string.IsNullOrWhiteSpace(Attempted("Password")) &&
+                !string.Equals(Attempted("ConfirmPassword"), Attempted("Password"), StringComparison.Ordinal))
+            {
+                code = "AUTH_PASSWORD_MISMATCH"; codedMessage = "Passwords do not match.";
+            }
+            else if (System.Text.Encoding.UTF8.GetByteCount(Attempted("Password")) > 72)
+            {
+                code = "AUTH_PASSWORD_TOO_LONG"; codedMessage = "Password must not exceed 72 UTF-8 bytes.";
+            }
+            else if (!string.IsNullOrWhiteSpace(Attempted("Email")) &&
+                !Attempted("Email").EndsWith("@gmail.com", StringComparison.OrdinalIgnoreCase))
+            {
+                code = "AUTH_GMAIL_REQUIRED"; codedMessage = "Only Gmail addresses are supported.";
+            }
+            else if (context.ModelState.TryGetValue("DateOfBirth", out var dob) && dob.Errors.Count > 0)
+            {
+                code = "AUTH_DOB_INVALID"; codedMessage = "Date of birth is invalid.";
+            }
+
+            if (code is not null)
+                return new Microsoft.AspNetCore.Mvc.BadRequestObjectResult(new { success = false, code, message = codedMessage });
+        }
         return new Microsoft.AspNetCore.Mvc.BadRequestObjectResult(new { success = false, message, errors });
     };
 });
@@ -47,6 +76,8 @@ builder.Services.AddScoped<IGoogleCredentialVerifier, GoogleCredentialVerifier>(
 builder.Services.AddScoped<IGoogleDriveAvatarService, GoogleDriveAvatarService>();
 builder.Services.AddScoped<IGoogleAvatarSyncService, GoogleAvatarSyncService>();
 builder.Services.AddScoped<IFamilyTreeService, FamilyTreeService>();
+builder.Services.AddMemoryCache(options => options.SizeLimit = 64L * 1024 * 1024);
+builder.Services.AddSingleton<IMemberAvatarImageCache, MemberAvatarImageCache>();
 builder.Services.AddHttpClient(nameof(GoogleDriveMemberAvatarService), client => client.Timeout = TimeSpan.FromSeconds(45));
 builder.Services.AddScoped<IGoogleDriveMemberAvatarService, GoogleDriveMemberAvatarService>();
 builder.Services.AddHttpClient(nameof(GoogleDriveLibraryStorageService), client => client.Timeout = TimeSpan.FromSeconds(45));

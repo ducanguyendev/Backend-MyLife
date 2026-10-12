@@ -34,8 +34,6 @@ namespace MyLife.Features.FamilyTree.DTOs
         [MaxLength(255)]
         public string? InstagramUrl { get; set; }
 
-        public string? AvatarUrl { get; set; }
-
         public string? Biography { get; set; }
 
         public int? FatherId { get; set; }

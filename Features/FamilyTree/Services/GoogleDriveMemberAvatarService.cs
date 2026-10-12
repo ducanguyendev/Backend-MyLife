@@ -8,6 +8,7 @@ public sealed record MemberAvatarStorageResult(bool Success, string? FileId, str
 
 public interface IGoogleDriveMemberAvatarService
 {
+    Task<MemberAvatarImageResult?> GetAvatarAsync(int memberId, string fileId, DateTime version, CancellationToken cancellationToken = default);
     Task<MemberAvatarStorageResult> UploadAvatarAsync(int memberId, byte[] content, string contentType,
         string? existingFileId, CancellationToken cancellationToken = default);
     Task<bool> DeleteAvatarAsync(int memberId, string? fileId, CancellationToken cancellationToken = default);
@@ -16,8 +17,85 @@ public interface IGoogleDriveMemberAvatarService
 // Storage contract only. FamilyTree's existing URL CRUD is unchanged; a future
 // member upload endpoint must authorize the member and persist the returned ID.
 public sealed class GoogleDriveMemberAvatarService(IConfiguration configuration, IHttpClientFactory clients,
-    ILogger<GoogleDriveMemberAvatarService> logger) : IGoogleDriveMemberAvatarService
+    ILogger<GoogleDriveMemberAvatarService> logger, IMemberAvatarImageCache imageCache) : IGoogleDriveMemberAvatarService
 {
+    private const int MaxAvatarBytes = 5 * 1024 * 1024;
+    private static readonly HashSet<string> AllowedAvatarTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+
+    public async Task<MemberAvatarImageResult?> GetAvatarAsync(int memberId, string fileId, DateTime version, CancellationToken cancellationToken = default)
+    {
+        fileId = fileId.Trim();
+        if (memberId <= 0 || !ValidId(fileId)) return null;
+        var key = ImageCacheKey(memberId, fileId, version);
+        return await imageCache.GetOrCreateAsync(memberId, key,
+            () => DownloadAvatarAsync(memberId, fileId, version, cancellationToken), cancellationToken);
+    }
+
+    internal static string ImageCacheKey(int memberId, string fileId, DateTime version) =>
+        $"family-member-avatar:{memberId}:{fileId}:{version.ToUniversalTime().Ticks}";
+
+    private async Task<MemberAvatarImageResult?> DownloadAvatarAsync(int memberId, string fileId, DateTime version, CancellationToken cancellationToken)
+    {
+        HttpResponseMessage? response = null;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(15));
+            var client = clients.CreateClient(nameof(GoogleDriveMemberAvatarService));
+            // A Drive overwrite keeps the file ID stable. Include the persisted member
+            // revision so Google's CDN sees a distinct URL after replacement.
+            var revision = version.ToUniversalTime().Ticks;
+            response = await client.GetAsync($"https://lh3.googleusercontent.com/d/{Uri.EscapeDataString(fileId)}?v={revision}", HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                logger.LogWarning("Member avatar image upstream failed MemberId={MemberId} StatusCode={StatusCode} ErrorType={ErrorType}", memberId, (int)response.StatusCode, "HttpStatus");
+                return null;
+            }
+
+            var mediaType = response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant();
+            if (mediaType is null || !AllowedAvatarTypes.Contains(mediaType) ||
+                (response.Content.Headers.ContentLength is long length && (length <= 0 || length > MaxAvatarBytes)))
+            {
+                logger.LogWarning("Member avatar image upstream rejected MemberId={MemberId} StatusCode={StatusCode} ErrorType={ErrorType}", memberId, (int)response.StatusCode, "InvalidContentTypeOrSize");
+                return null;
+            }
+
+            await using var input = await response.Content.ReadAsStreamAsync(timeout.Token);
+            using var output = new MemoryStream();
+            var buffer = new byte[81920];
+            while (true)
+            {
+                var read = await input.ReadAsync(buffer, timeout.Token);
+                if (read == 0) break;
+                if (output.Length + read > MaxAvatarBytes)
+                {
+                    logger.LogWarning("Member avatar image upstream rejected MemberId={MemberId} StatusCode={StatusCode} ErrorType={ErrorType}", memberId, (int)response.StatusCode, "ResponseTooLarge");
+                    return null;
+                }
+                await output.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
+            }
+            var imageBytes = output.ToArray();
+            if (imageBytes.Length == 0 || !HasMatchingSignature(imageBytes, mediaType))
+            {
+                logger.LogWarning("Member avatar image upstream rejected MemberId={MemberId} StatusCode={StatusCode} ErrorType={ErrorType}", memberId, (int)response.StatusCode, "InvalidImageBytes");
+                return null;
+            }
+
+            var etagInput = System.Text.Encoding.UTF8.GetBytes($"{memberId}:{fileId}:{revision}");
+            var etag = $"\"{Convert.ToHexString(SHA256.HashData(etagInput)).ToLowerInvariant()}\"";
+            return new MemberAvatarImageResult(imageBytes, mediaType, etag);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !cancellationToken.IsCancellationRequested)
+        {
+            logger.LogWarning("Member avatar image upstream failed MemberId={MemberId} StatusCode={StatusCode} ErrorType={ErrorType}", memberId, response is null ? 0 : (int)response.StatusCode, ex.GetType().Name);
+            return null;
+        }
+        finally
+        {
+            response?.Dispose();
+        }
+    }
+
     public async Task<MemberAvatarStorageResult> UploadAvatarAsync(int memberId, byte[] content, string contentType,
         string? existingFileId, CancellationToken cancellationToken = default)
     {

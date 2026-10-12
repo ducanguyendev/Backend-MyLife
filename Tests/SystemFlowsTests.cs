@@ -85,6 +85,30 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
     private readonly HttpClient client = CreateClient(factory);
 
     [Fact]
+    public async Task Register_returns_machine_codes_for_conflicts_and_known_validation_errors()
+    {
+        var email = $"register-codes.{Guid.NewGuid():N}@gmail.com";
+        const string password = "User_Test!234567";
+        var valid = new { fullName = "Code Test", phoneNumber = "0912345678", gender = "Nam", dateOfBirth = "1995-05-20", email, password, confirmPassword = password };
+        Assert.Equal(HttpStatusCode.Created, (await Post("/api/auth/register", valid)).StatusCode);
+
+        await AssertCode(HttpStatusCode.Conflict, "AUTH_EMAIL_ALREADY_REGISTERED", valid);
+        await AssertCode(HttpStatusCode.BadRequest, "AUTH_PASSWORD_MISMATCH", new { valid.fullName, valid.phoneNumber, valid.gender, valid.dateOfBirth, email = $"mismatch.{Guid.NewGuid():N}@gmail.com", password, confirmPassword = "Other_Test!234567" });
+        await AssertCode(HttpStatusCode.BadRequest, "AUTH_PASSWORD_TOO_LONG", new { valid.fullName, valid.phoneNumber, valid.gender, valid.dateOfBirth, email = $"long.{Guid.NewGuid():N}@gmail.com", password = new string('a', 73), confirmPassword = new string('a', 73) });
+        await AssertCode(HttpStatusCode.BadRequest, "AUTH_GMAIL_REQUIRED", new { valid.fullName, valid.phoneNumber, valid.gender, valid.dateOfBirth, email = $"non-gmail.{Guid.NewGuid():N}@example.com", password, confirmPassword = password });
+        await AssertCode(HttpStatusCode.BadRequest, "AUTH_DOB_INVALID", new { valid.fullName, valid.phoneNumber, valid.gender, dateOfBirth = "not-a-date", email = $"dob.{Guid.NewGuid():N}@gmail.com", password, confirmPassword = password });
+    }
+
+    private async Task AssertCode(HttpStatusCode status, string code, object payload)
+    {
+        using var response = await Post("/api/auth/register", payload);
+        Assert.Equal(status, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(code, body.GetProperty("code").GetString());
+        Assert.False(string.IsNullOrWhiteSpace(body.GetProperty("message").GetString()));
+    }
+
+    [Fact]
     public async Task Auth_refresh_admin_and_family_tree_flows()
     {
         var suffix = Guid.NewGuid().ToString("N")[..10];

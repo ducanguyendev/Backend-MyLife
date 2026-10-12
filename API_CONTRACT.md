@@ -23,6 +23,12 @@ Browser mutations send `credentials: include` and `X-Requested-With: MyLife`; Ja
 | PUT | `/api/me/profile` | Authenticated profile update. |
 | POST | `/api/auth/change-password` | Local-provider accounts only. |
 
+Register errors use machine-readable codes with unchanged semantic HTTP statuses:
+`AUTH_PASSWORD_MISMATCH`, `AUTH_PASSWORD_TOO_LONG`, `AUTH_GMAIL_REQUIRED`,
+`AUTH_EMAIL_ALREADY_REGISTERED` (409), `AUTH_DOB_INVALID`, and
+`AUTH_SERVICE_NOT_INITIALIZED` (503). `RATE_LIMITED` remains 429. Other field
+validation errors retain the standard validation response.
+
 `user.id` is an integer and `role` is always `ADMIN` or `USER`. The business model is ADMIN XOR USER: exactly one supported role. The compatibility `roles` array contains only that primary role. Ambiguous supported-role assignments are refused by login, refresh and JWT validation. ADMIN does not imply USER. `authProvider` is retained only as legacy account-origin data; `loginProviders.local` and `loginProviders.google` describe usable methods.
 
 ## Avatar
@@ -116,10 +122,29 @@ leave `AVATAR_FOLDER_ID` unchanged. No folder IDs belong in backend config.
 
 ## FamilyMember avatar storage contract
 
-The current FamilyTree HTTP CRUD accepts `avatarUrl`; it has no Phase 2 member
-avatar upload/delete HTTP endpoint or persisted Drive file ID yet. The isolated
-`IGoogleDriveMemberAvatarService` client now defines the matching Apps Script
-storage contract for that integration, reusing `GoogleDrive:WebAppUrl`:
+FamilyTree avatar operations require an authenticated `USER` and are scoped to
+that user's tree. A foreign member is indistinguishable from a missing member
+(404). Managed avatar IDs are never returned in `FamilyMemberDto`; `hasManagedAvatar`
+indicates whether the server has a managed file. Managed `avatarUrl` is omitted,
+while legacy external avatar URLs remain available.
+
+| Method | Route | Result |
+| --- | --- | --- |
+| POST | `/api/family-tree/{id}/avatar` | Authenticated multipart upload (`file`, max 5 MiB). |
+| DELETE | `/api/family-tree/{id}/avatar` | Deletes the managed avatar and clears its metadata. |
+| GET | `/api/family-tree/{id}/avatar/image` | Streams a validated managed image; 404 `MEMBER_AVATAR_NOT_FOUND`, 502 `MEMBER_AVATAR_UPSTREAM_FAILED`. |
+
+The image route serves server-fetched bytes, not a Drive redirect. It accepts
+JPEG/PNG/WebP/GIF only, limits the response to 5 MiB, returns a private revalidated
+ETag response, and caches successful bytes for 30 minutes. Upstream failures are
+negative-cached briefly to bound repeated requests. Upload, avatar deletion and
+member deletion evict the prior version. The read path uses the stable file ID and
+a stable revision query on the server-side upstream URL:
+`https://lh3.googleusercontent.com/d/{fileId}?v={updatedAtUtcTicks}`. The same
+revision reuses the backend cache; replacement advances `UpdatedAt` so the next
+read uses a new upstream URL and ETag. It does not retry.
+The isolated `IGoogleDriveMemberAvatarService` uses the existing Apps Script
+upload/delete actions and `GoogleDrive:WebAppUrl`:
 
 ```json
 { "action": "member_avatar_upload", "memberId": 15, "fileBase64": "...",
@@ -148,8 +173,7 @@ Delete checks the explicit file's parent before trashing it and also removes
 stable-name legacy duplicates in the member folder. It permits retries of a
 tracked file already trashed; an unavailable/outside explicit ID fails without
 legacy fallback. Without ID, deleting an absent legacy avatar succeeds with
-`deleted: false`. A future HTTP integration must authorize the member and persist
-the stable file ID; this storage client does not change current FamilyTree CRUD.
+`deleted: false`. Apps Script is unchanged by the image-delivery integration.
 
 ## Family tree
 

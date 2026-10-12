@@ -208,6 +208,7 @@ namespace MyLife.Shared.Data
                 entity.HasKey(e => e.Id);
                 entity.Property(e => e.Id).HasColumnName("id");
                 entity.HasOne(e => e.FamilyTree).WithMany(e => e.Members).HasForeignKey(e => e.FamilyTreeId).OnDelete(DeleteBehavior.Restrict);
+                entity.Property(e => e.AvatarDriveFileId).HasColumnName("avatar_drive_file_id").HasMaxLength(255);
                 entity.HasIndex(e => e.FamilyTreeId);
                 entity.HasIndex(e => new { e.FamilyTreeId, e.Generation });
                 

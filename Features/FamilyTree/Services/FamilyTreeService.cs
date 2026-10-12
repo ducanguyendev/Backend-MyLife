@@ -6,7 +6,7 @@ using UserFamilyTree = MyLife.Shared.Entities.FamilyTree;
 
 namespace MyLife.Features.FamilyTree.Services;
 
-public sealed class FamilyTreeService(AppDbContext context) : IFamilyTreeService
+public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAvatarService avatarStorage, IMemberAvatarImageCache avatarImageCache, ILogger<FamilyTreeService> logger) : IFamilyTreeService
 {
     public async Task<UserFamilyTree> EnsureUserFamilyTreeAsync(int userId, CancellationToken ct)
     {
@@ -48,7 +48,7 @@ public sealed class FamilyTreeService(AppDbContext context) : IFamilyTreeService
         await using var transaction = await context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         await ValidateReferencesAsync(tree.Id, null, dto.FatherId, dto.MotherId, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, dto.Gender, ct);
         var member = new FamilyMember { FamilyTreeId = tree.Id, FullName = dto.FullName.Trim(), Generation = dto.Generation, Gender = dto.Gender, DateOfBirth = dto.DateOfBirth, Role = dto.Role,
-            Address = dto.Address, PhoneNumber = dto.PhoneNumber, FacebookUrl = dto.FacebookUrl, InstagramUrl = dto.InstagramUrl, AvatarUrl = dto.AvatarUrl, Biography = dto.Biography,
+            Address = dto.Address, PhoneNumber = dto.PhoneNumber, FacebookUrl = dto.FacebookUrl, InstagramUrl = dto.InstagramUrl, Biography = dto.Biography,
             FatherId = dto.FatherId, MotherId = dto.MotherId, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
         context.FamilyMembers.Add(member); await context.SaveChangesAsync(ct);
         await SynchronizeRelationsAsync(member, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, ct);
@@ -63,7 +63,7 @@ public sealed class FamilyTreeService(AppDbContext context) : IFamilyTreeService
         var member = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == id && x.FamilyTreeId == tree.Id, ct) ?? throw new KeyNotFoundException();
         await ValidateReferencesAsync(tree.Id, id, dto.FatherId, dto.MotherId, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, dto.Gender, ct);
         member.FullName = dto.FullName.Trim(); member.Generation = dto.Generation; member.Gender = dto.Gender; member.DateOfBirth = dto.DateOfBirth; member.Role = dto.Role;
-        member.Address = dto.Address; member.PhoneNumber = dto.PhoneNumber; member.FacebookUrl = dto.FacebookUrl; member.InstagramUrl = dto.InstagramUrl; member.AvatarUrl = dto.AvatarUrl; member.Biography = dto.Biography;
+        member.Address = dto.Address; member.PhoneNumber = dto.PhoneNumber; member.FacebookUrl = dto.FacebookUrl; member.InstagramUrl = dto.InstagramUrl; member.Biography = dto.Biography;
         member.FatherId = dto.FatherId; member.MotherId = dto.MotherId; member.UpdatedAt = DateTime.UtcNow;
         await SynchronizeRelationsAsync(member, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, ct);
         await context.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
@@ -75,10 +75,107 @@ public sealed class FamilyTreeService(AppDbContext context) : IFamilyTreeService
         var tree = await EnsureUserFamilyTreeAsync(userId, ct);
         await using var transaction = await context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         var member = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == id && x.FamilyTreeId == tree.Id, ct); if (member is null) return false;
+        var avatarFileId = member.AvatarDriveFileId;
+        var avatarVersion = member.UpdatedAt;
         if (member.SpouseId is int spouseId) { var spouse = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == spouseId && x.FamilyTreeId == tree.Id, ct); if (spouse?.SpouseId == id) spouse.SpouseId = null; }
         var children = await context.FamilyMembers.Where(x => x.FamilyTreeId == tree.Id && (x.FatherId == id || x.MotherId == id || x.SpouseId == id)).ToListAsync(ct);
         foreach (var child in children) { if (child.FatherId == id) child.FatherId = null; if (child.MotherId == id) child.MotherId = null; if (child.SpouseId == id) child.SpouseId = null; child.UpdatedAt = DateTime.UtcNow; }
-        context.FamilyMembers.Remove(member); await context.SaveChangesAsync(ct); await transaction.CommitAsync(ct); return true;
+        context.FamilyMembers.Remove(member); await context.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
+        avatarImageCache.Invalidate(id, avatarFileId, avatarVersion);
+        if (!string.IsNullOrWhiteSpace(avatarFileId))
+        {
+            try
+            {
+                if (!await avatarStorage.DeleteAvatarAsync(id, avatarFileId, CancellationToken.None))
+                    logger.LogWarning("Family member deleted but avatar cleanup failed MemberId={MemberId}", id);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning("Family member deleted but avatar cleanup failed MemberId={MemberId} ErrorType={ErrorType}", id, ex.GetType().Name);
+            }
+        }
+        return true;
+    }
+
+    public async Task<FamilyMemberDto> UploadMemberAvatarAsync(int userId, int memberId, byte[] content, string contentType, CancellationToken ct)
+    {
+        var tree = await EnsureUserFamilyTreeAsync(userId, ct);
+        var member = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == memberId && x.FamilyTreeId == tree.Id, ct) ?? throw new KeyNotFoundException();
+        var mime = contentType.Trim().ToLowerInvariant() is "image/jpg" ? "image/jpeg" : contentType.Trim().ToLowerInvariant();
+        if (content.Length is <= 0 or > 5 * 1024 * 1024 || !IsAllowedImage(mime))
+            throw new FamilyTreeValidationException("FAMILY_AVATAR_INVALID", "The avatar file must be a JPG, PNG, WebP or GIF up to 5 MiB.");
+
+        var previousId = member.AvatarDriveFileId;
+        var previousUpdatedAt = member.UpdatedAt;
+        var stored = await avatarStorage.UploadAvatarAsync(member.Id, content, mime, previousId, ct);
+        if (!stored.Success || string.IsNullOrWhiteSpace(stored.FileId) || !Uri.TryCreate(stored.Url, UriKind.Absolute, out var url) || url.Scheme != Uri.UriSchemeHttps)
+        {
+            if (previousId is null && !string.IsNullOrWhiteSpace(stored.FileId))
+            {
+                try { await avatarStorage.DeleteAvatarAsync(member.Id, stored.FileId, CancellationToken.None); }
+                catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning("New member avatar compensation failed MemberId={MemberId} ErrorType={ErrorType}", memberId, ex.GetType().Name); }
+            }
+            throw new FamilyTreeStorageException();
+        }
+
+        var previousUrl = member.AvatarUrl;
+        member.AvatarDriveFileId = stored.FileId;
+        member.AvatarUrl = stored.Url;
+        member.UpdatedAt = NextAvatarVersion(previousUpdatedAt);
+        try { await context.SaveChangesAsync(ct); }
+        catch
+        {
+            member.AvatarDriveFileId = previousId;
+            member.AvatarUrl = previousUrl;
+            member.UpdatedAt = previousUpdatedAt;
+            if (previousId is null && string.IsNullOrWhiteSpace(stored.FileId) is false)
+            {
+                try { await avatarStorage.DeleteAvatarAsync(member.Id, stored.FileId, CancellationToken.None); }
+                catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning("New member avatar compensation failed MemberId={MemberId} ErrorType={ErrorType}", memberId, ex.GetType().Name); }
+            }
+            throw;
+        }
+        avatarImageCache.Invalidate(memberId, previousId, previousUpdatedAt);
+        return (await GetMemberByIdAsync(userId, memberId, ct))!;
+    }
+
+    public async Task<FamilyMemberDto> DeleteMemberAvatarAsync(int userId, int memberId, CancellationToken ct)
+    {
+        var tree = await EnsureUserFamilyTreeAsync(userId, ct);
+        var member = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == memberId && x.FamilyTreeId == tree.Id, ct) ?? throw new KeyNotFoundException();
+        if ((member.AvatarDriveFileId is not null || member.AvatarUrl is not null) && !await avatarStorage.DeleteAvatarAsync(member.Id, member.AvatarDriveFileId, ct))
+            throw new FamilyTreeStorageException();
+        var previousId = member.AvatarDriveFileId; var previousUrl = member.AvatarUrl; var previousUpdatedAt = member.UpdatedAt;
+        member.AvatarDriveFileId = null; member.AvatarUrl = null; member.UpdatedAt = NextAvatarVersion(previousUpdatedAt);
+        try { await context.SaveChangesAsync(ct); }
+        catch
+        {
+            member.AvatarDriveFileId = previousId; member.AvatarUrl = previousUrl; member.UpdatedAt = previousUpdatedAt;
+            throw;
+        }
+        avatarImageCache.Invalidate(memberId, previousId, previousUpdatedAt);
+        return (await GetMemberByIdAsync(userId, memberId, ct))!;
+    }
+
+    public async Task<MemberAvatarImageResult?> GetMemberAvatarImageAsync(int userId, int memberId, CancellationToken ct)
+    {
+        var tree = await EnsureUserFamilyTreeAsync(userId, ct);
+        var member = await context.FamilyMembers.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == memberId && x.FamilyTreeId == tree.Id, ct);
+        if (member is null || string.IsNullOrWhiteSpace(member.AvatarDriveFileId)) return null;
+        var image = await avatarStorage.GetAvatarAsync(member.Id, member.AvatarDriveFileId, member.UpdatedAt, ct);
+        return image ?? throw new FamilyTreeStorageException();
+    }
+
+    private static bool IsAllowedImage(string mime) => mime is "image/jpeg" or "image/png" or "image/webp" or "image/gif";
+
+    internal static DateTime NextAvatarVersion(DateTime previousVersion)
+    {
+        var now = DateTime.UtcNow;
+        // PostgreSQL timestamps have microsecond precision. Add a millisecond when
+        // the clock has not moved past the previous revision to guarantee a new key.
+        var next = previousVersion.AddMilliseconds(1);
+        return now > next ? now : next;
     }
 
     private async Task SynchronizeRelationsAsync(FamilyMember member, int? spouseId, List<int>? childIds, List<HorizontalRelationDto>? horizontal, CancellationToken ct)
@@ -202,7 +299,9 @@ public sealed class FamilyTreeService(AppDbContext context) : IFamilyTreeService
     {
         var children = member.ChildrenAsFather.Concat(member.ChildrenAsMother).DistinctBy(x => x.Id).ToList();
         return new FamilyMemberDto { Id = member.Id, FullName = member.FullName, Generation = member.Generation, Gender = member.Gender, DateOfBirth = member.DateOfBirth, Role = member.Role, Address = member.Address,
-            PhoneNumber = member.PhoneNumber, FacebookUrl = member.FacebookUrl, InstagramUrl = member.InstagramUrl, AvatarUrl = member.AvatarUrl, Biography = member.Biography,
+            PhoneNumber = member.PhoneNumber, FacebookUrl = member.FacebookUrl, InstagramUrl = member.InstagramUrl,
+            AvatarUrl = string.IsNullOrWhiteSpace(member.AvatarDriveFileId) ? member.AvatarUrl : null,
+            HasManagedAvatar = !string.IsNullOrWhiteSpace(member.AvatarDriveFileId), Biography = member.Biography,
             FatherId = member.FatherId, FatherName = member.Father?.FullName, MotherId = member.MotherId, MotherName = member.Mother?.FullName, SpouseId = member.SpouseId, SpouseName = member.Spouse?.FullName,
             ChildIds = children.Select(x => x.Id).ToList(), ChildNames = children.Select(x => x.FullName).ToList(), HorizontalRelations = member.RelationsAsMember1.Select(x => new HorizontalRelationDto { MemberId = x.Member2Id, RelationType = x.RelationType }).Concat(member.RelationsAsMember2.Select(x => new HorizontalRelationDto { MemberId = x.Member1Id, RelationType = x.RelationType })).ToList(), CreatedAt = member.CreatedAt, UpdatedAt = member.UpdatedAt };
     }

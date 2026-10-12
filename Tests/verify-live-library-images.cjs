@@ -30,13 +30,19 @@ async function main() {
   const paths = fixtures.map(f => { const path = join(artifacts, f.name); writeFileSync(path, Buffer.from(f.base64, 'base64')); return path; });
   const albumId = (BigInt(Date.now()) * 1000000n + BigInt(randomInt(1000000))).toString();
   let folderId; let browser; let page;
-  const photos = []; const errors = []; const now = new Date().toISOString();
+  const photos = []; const errors = []; const imageResponses = []; const now = new Date().toISOString();
   try {
     const folder = await post({ action: 'library_create_album_folder', albumId });
     folderId = folder.folderId; assert.equal(folder.folderName, `album_${albumId}`); assert.ok(folderId);
     console.log(JSON.stringify({ step: 'created-disposable-album', folderId }));
     browser = await puppeteer.launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' });
     page = await browser.newPage(); await page.setViewport({ width: 1280, height: 1000 });
+    page.on('response', response => {
+      const request = response.request();
+      if (request.resourceType() !== 'image' || request.url().startsWith('blob:')) return;
+      imageResponses.push({ requestUrl: request.redirectChain()[0]?.url() || request.url(), finalUrl: response.url(),
+        status: response.status(), redirectChain: request.redirectChain().map(item => item.url()) });
+    });
     page.on('pageerror', e => errors.push(e.message));
     await page.evaluateOnNewDocument(() => {
       localStorage.setItem('app_language', 'vi'); localStorage.setItem('i18nextLng', 'vi');
@@ -57,7 +63,7 @@ async function main() {
         'access-control-allow-headers': 'Content-Type,X-Requested-With' };
       const respond = (body, status = 200) => request.respond({ status, headers, contentType: 'application/json', body: status === 204 ? undefined : JSON.stringify(body) });
       if (request.method() === 'OPTIONS') return respond(null, 204);
-      if (url.pathname === '/api/me') return respond({ id: 1, email: 'library-live@example.com', name: 'Library Live', role: 'ADMIN', isActive: true, avatarUrl: null });
+      if (url.pathname === '/api/me') return respond({ id: 1, email: 'library-live@example.com', name: 'Library Live', role: 'USER', isActive: true, avatarUrl: null });
       if (url.pathname.startsWith('/api/family-tree')) return respond({ success: true, data: [] });
       if (url.pathname === '/api/library/categories') return respond([{ id: 1, name: 'Ảnh tư liệu', slug: 'photos', isDefault: true }]);
       const album = { id: 1, name: 'Disposable live image test', description: null, photoCount: photos.length, coverPhotoUrl: null, createdAt: now, updatedAt: now, photos };
@@ -80,7 +86,8 @@ async function main() {
             photos.push({ id: photos.length + 1, driveFileId: result.fileId, title: null, category: 'photos',
               fileName: fixture.name, contentType: fixture.contentType, fileSize: bytes.length, url: result.url,
               caption: null, description: null, author: null, displayDate: null, sortOrder: 0, takenAt: null, createdAt: now });
-            console.log(JSON.stringify({ step: 'uploaded-verified-original', name: fixture.name, contentType: result.contentType, bytes: bytes.length, fileId: result.fileId }));
+            console.log(JSON.stringify({ step: 'uploaded-verified-original', name: fixture.name, contentType: result.contentType,
+              bytes: bytes.length, fileId: result.fileId, url: result.url || null }));
           }
           return respond(photos, 201);
         } catch (e) { errors.push(e.message); return respond({ code: 'LIBRARY_STORAGE_FAILED' }, 502); }
@@ -108,9 +115,11 @@ async function main() {
       return page.evaluate(names => names.map(name => { const image = document.querySelector(`img[alt="${name}"]`); return { name, candidate: image.src.includes('/thumbnail?') ? 'thumbnail' : 'primary', width: image.naturalWidth }; }), fixtures.map(f => f.name));
     };
     console.log(JSON.stringify({ step: 'gallery', images: await rendered() }));
+    console.log(JSON.stringify({ step: 'gallery-image-network', responses: imageResponses }));
     await page.screenshot({ path: join(artifacts, 'gallery.png'), fullPage: true });
     await page.reload({ waitUntil: 'networkidle0' }); await openLibrary();
     console.log(JSON.stringify({ step: 'after-reload', images: await rendered() }));
+    console.log(JSON.stringify({ step: 'reload-image-network', responses: imageResponses.slice(4) }));
     for (const photo of photos) {
       await click(photo.fileName, 'h4'); await page.waitForSelector('[role="dialog"]');
       await page.waitForFunction(() => document.querySelector('[role="dialog"] img')?.naturalWidth > 0, { timeout: 60000 });
