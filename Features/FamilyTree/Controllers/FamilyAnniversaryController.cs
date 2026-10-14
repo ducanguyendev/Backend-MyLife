@@ -22,6 +22,13 @@ public sealed class FamilyAnniversaryController(IFamilyAnniversaryService servic
         catch (FamilyAnniversaryValidationException ex) { return Task.FromResult<IActionResult>(BadRequest(Error(ex.Code, ex.Message))); }
     });
 
+    [HttpGet("next-occurrence")]
+    public Task<IActionResult> NextOccurrence([FromQuery] int day, [FromQuery] int month, [FromQuery] bool isLeapMonth = false) => Run(_ =>
+    {
+        try { return Task.FromResult<IActionResult>(Ok(new { success = true, data = service.GetNextOccurrence(day, month, isLeapMonth) })); }
+        catch (FamilyAnniversaryValidationException ex) { return Task.FromResult<IActionResult>(BadRequest(Error(ex.Code, ex.Message))); }
+    });
+
     [HttpGet("{id:long}")]
     public Task<IActionResult> Get(long id, CancellationToken ct) => Run(async userId =>
     {

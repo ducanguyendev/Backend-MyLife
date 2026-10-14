@@ -211,7 +211,29 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         var item = (await Body(created)).GetProperty("data");
         var id = item.GetProperty("id").GetInt64();
         Assert.Equal(aMember, item.GetProperty("relatedMemberId").GetInt32());
+        Assert.Equal("2024-02-10", item.GetProperty("originalSolarDate").GetString());
+        Assert.Equal(2024, item.GetProperty("lunarYear").GetInt32());
         Assert.True(item.GetProperty("daysUntil").GetInt32() >= 0);
+
+        using (var mismatch = await Send(a.Token, HttpMethod.Post, "/api/family-tree/anniversaries", Anniversary("Mismatch", aMember, "2024-02-11")))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, mismatch.StatusCode);
+            Assert.Equal("FAMILY_ANNIVERSARY_DATE_MISMATCH", (await Body(mismatch)).GetProperty("code").GetString());
+        }
+
+        using (var invalidLeap = await Send(a.Token, HttpMethod.Post, "/api/family-tree/anniversaries", Anniversary("Invalid leap", aMember, "2024-02-10", leap: true)))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, invalidLeap.StatusCode);
+            Assert.Equal("FAMILY_ANNIVERSARY_INVALID_LUNAR_DATE", (await Body(invalidLeap)).GetProperty("code").GetString());
+        }
+
+        using (var preview = await Send(a.Token, HttpMethod.Get, "/api/family-tree/anniversaries/next-occurrence?day=1&month=1&isLeapMonth=false"))
+        {
+            Assert.Equal(HttpStatusCode.OK, preview.StatusCode);
+            var previewData = (await Body(preview)).GetProperty("data");
+            Assert.Equal(1, previewData.GetProperty("lunarDay").GetInt32());
+            Assert.True(previewData.GetProperty("daysUntil").GetInt32() >= 0);
+        }
 
         using (var listA = await Send(a.Token, HttpMethod.Get, "/api/family-tree/anniversaries"))
             Assert.Equal(id, (await Body(listA)).GetProperty("data").EnumerateArray().Single().GetProperty("id").GetInt64());
@@ -245,10 +267,37 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
-    private static Dictionary<string, object?> Anniversary(string title, int? memberId) => new()
+    [Fact]
+    public async Task Legacy_anniversary_without_original_dates_still_lists_and_calculates_occurrence()
+    {
+        var owner = await User();
+        await Create(owner.Token, "Legacy member");
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var treeId = await db.FamilyTrees.Where(tree => tree.OwnerUserId == owner.Id).Select(tree => tree.Id).SingleAsync();
+            db.FamilyAnniversaries.Add(new MyLife.Shared.Entities.FamilyAnniversary
+            {
+                FamilyTreeId = treeId, EventType = "DEATH_ANNIVERSARY", Title = "Legacy", LunarDay = 1,
+                LunarMonth = 1, IsLeapMonth = false, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await Send(owner.Token, HttpMethod.Get, "/api/family-tree/anniversaries");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var legacy = (await Body(response)).GetProperty("data").EnumerateArray().Single();
+        Assert.Equal(JsonValueKind.Null, legacy.GetProperty("originalSolarDate").ValueKind);
+        Assert.Equal(JsonValueKind.Null, legacy.GetProperty("lunarYear").ValueKind);
+        Assert.False(string.IsNullOrWhiteSpace(legacy.GetProperty("nextSolarDate").GetString()));
+        Assert.True(legacy.GetProperty("daysUntil").GetInt32() >= 0);
+    }
+
+    private static Dictionary<string, object?> Anniversary(string title, int? memberId, string originalSolarDate = "2024-02-10", bool leap = false) => new()
     {
         ["eventType"] = "DEATH_ANNIVERSARY", ["title"] = title, ["relatedMemberId"] = memberId,
-        ["lunarDay"] = 1, ["lunarMonth"] = 1, ["isLeapMonth"] = false,
+        ["lunarDay"] = 1, ["lunarMonth"] = 1, ["isLeapMonth"] = leap,
+        ["originalSolarDate"] = originalSolarDate, ["lunarYear"] = 2024,
         ["place"] = "", ["host"] = null, ["notes"] = null
     };
 

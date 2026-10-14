@@ -214,6 +214,8 @@ namespace MyLife.Shared.Data
                 entity.Property(e => e.LunarDay).HasColumnName("lunar_day").IsRequired();
                 entity.Property(e => e.LunarMonth).HasColumnName("lunar_month").IsRequired();
                 entity.Property(e => e.IsLeapMonth).HasColumnName("is_leap_month").HasDefaultValue(false).IsRequired();
+                entity.Property(e => e.OriginalSolarDate).HasColumnName("original_solar_date");
+                entity.Property(e => e.LunarYear).HasColumnName("lunar_year");
                 entity.Property(e => e.Place).HasColumnName("place").HasMaxLength(500);
                 entity.Property(e => e.Host).HasColumnName("host").HasMaxLength(300);
                 entity.Property(e => e.Notes).HasColumnName("notes").HasMaxLength(2000);

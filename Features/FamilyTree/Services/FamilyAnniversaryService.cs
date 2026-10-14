@@ -32,6 +32,7 @@ public sealed class FamilyAnniversaryService(
     {
         var tree = await familyTrees.EnsureUserFamilyTreeAsync(userId, ct);
         var values = Validate(dto);
+        ValidateOriginalDate(values.EventType, dto);
         var member = await ResolveMember(tree.Id, dto.RelatedMemberId, ct);
         EnsureRecurringDate(values.LunarDay, values.LunarMonth, dto.IsLeapMonth);
         var now = timeProvider.GetUtcNow().UtcDateTime;
@@ -39,7 +40,8 @@ public sealed class FamilyAnniversaryService(
         {
             FamilyTreeId = tree.Id, RelatedMemberId = member?.Id, EventType = values.EventType,
             Title = values.Title, LunarDay = values.LunarDay, LunarMonth = values.LunarMonth,
-            IsLeapMonth = dto.IsLeapMonth, Place = values.Place, Host = values.Host, Notes = values.Notes,
+            IsLeapMonth = dto.IsLeapMonth, OriginalSolarDate = dto.OriginalSolarDate, LunarYear = dto.LunarYear,
+            Place = values.Place, Host = values.Host, Notes = values.Notes,
             CreatedAt = now, UpdatedAt = now,
         };
         db.FamilyAnniversaries.Add(entity);
@@ -53,10 +55,12 @@ public sealed class FamilyAnniversaryService(
         var entity = await db.FamilyAnniversaries.SingleOrDefaultAsync(a => a.Id == id && a.FamilyTreeId == tree.Id, ct);
         if (entity is null) return null;
         var values = Validate(dto);
+        ValidateOriginalDate(values.EventType, dto);
         var member = await ResolveMember(tree.Id, dto.RelatedMemberId, ct);
         EnsureRecurringDate(values.LunarDay, values.LunarMonth, dto.IsLeapMonth);
         entity.EventType = values.EventType; entity.Title = values.Title; entity.RelatedMemberId = member?.Id;
         entity.LunarDay = values.LunarDay; entity.LunarMonth = values.LunarMonth; entity.IsLeapMonth = dto.IsLeapMonth;
+        entity.OriginalSolarDate = dto.OriginalSolarDate; entity.LunarYear = dto.LunarYear;
         entity.Place = values.Place; entity.Host = values.Host; entity.Notes = values.Notes; entity.UpdatedAt = timeProvider.GetUtcNow().UtcDateTime;
         await db.SaveChangesAsync(ct);
         return Map(await Query(tree.Id).SingleAsync(a => a.Id == id, ct), calendar.GetVietnamToday());
@@ -75,6 +79,18 @@ public sealed class FamilyAnniversaryService(
     public LunarToSolarDto ConvertLunarToSolar(int day, int month, int year, bool isLeapMonth)
     {
         try { return new(day, month, year, isLeapMonth, calendar.ConvertLunarToSolar(day, month, year, isLeapMonth)); }
+        catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
+    }
+
+    public NextAnniversaryOccurrenceDto GetNextOccurrence(int day, int month, bool isLeapMonth)
+    {
+        var today = calendar.GetVietnamToday();
+        try
+        {
+            var (solarDate, daysUntil) = calendar.NextOccurrence(day, month, isLeapMonth, today);
+            return new(day, month, isLeapMonth, solarDate, daysUntil, solarDate.Year,
+                calendar.HasPassedInCurrentSolarYear(day, month, isLeapMonth, today));
+        }
         catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
     }
 
@@ -103,6 +119,24 @@ public sealed class FamilyAnniversaryService(
         return (eventType, title, dto.LunarDay, dto.LunarMonth, place, host, notes);
     }
 
+    private void ValidateOriginalDate(string eventType, FamilyAnniversaryWriteDto dto)
+    {
+        if (eventType == "DEATH_ANNIVERSARY" && (dto.OriginalSolarDate is null || dto.LunarYear is null))
+            throw Invalid("FAMILY_ANNIVERSARY_ORIGINAL_DATE_REQUIRED", "Original solar date and lunar year are required for a death anniversary.");
+
+        if (dto.OriginalSolarDate is null && dto.LunarYear is null) return;
+        if (dto.OriginalSolarDate is null || dto.LunarYear is null)
+            throw Invalid("FAMILY_ANNIVERSARY_ORIGINAL_DATE_REQUIRED", "Provide both the original solar date and lunar year.");
+        if (dto.LunarYear is < 1800 or > 2200)
+            throw Invalid("FAMILY_ANNIVERSARY_INVALID_LUNAR_DATE", "Lunar year must be between 1800 and 2200.");
+
+        DateOnly converted;
+        try { converted = calendar.ConvertLunarToSolar(dto.LunarDay, dto.LunarMonth, dto.LunarYear.Value, dto.IsLeapMonth); }
+        catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
+        if (converted != dto.OriginalSolarDate.Value)
+            throw Invalid("FAMILY_ANNIVERSARY_DATE_MISMATCH", "The original solar date does not match the supplied lunar date.");
+    }
+
     private void EnsureRecurringDate(int day, int month, bool leap)
     {
         try { calendar.NextOccurrence(day, month, leap); }
@@ -116,7 +150,7 @@ public sealed class FamilyAnniversaryService(
         catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
         return new(item.Id, item.EventType, item.Title, item.RelatedMemberId,
             item.RelatedMember?.FullName, item.RelatedMember?.Generation, item.RelatedMember?.Role,
-            item.LunarDay, item.LunarMonth, item.IsLeapMonth, occurrence.next, occurrence.daysUntil,
+            item.LunarDay, item.LunarMonth, item.IsLeapMonth, item.OriginalSolarDate, item.LunarYear, occurrence.next, occurrence.daysUntil,
             item.Place, item.Host, item.Notes, item.CreatedAt, item.UpdatedAt);
     }
 

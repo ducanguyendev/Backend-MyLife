@@ -12,6 +12,8 @@ public sealed class FamilyAnniversary
     public int LunarDay { get; set; }
     public int LunarMonth { get; set; }
     public bool IsLeapMonth { get; set; }
+    public DateOnly? OriginalSolarDate { get; set; }
+    public int? LunarYear { get; set; }
     public string? Place { get; set; }
     public string? Host { get; set; }
     public string? Notes { get; set; }

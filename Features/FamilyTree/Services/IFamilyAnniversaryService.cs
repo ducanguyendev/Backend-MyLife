@@ -10,4 +10,5 @@ public interface IFamilyAnniversaryService
     Task<FamilyAnniversaryDto?> UpdateAsync(int userId, long id, FamilyAnniversaryWriteDto dto, CancellationToken ct);
     Task<bool> DeleteAsync(int userId, long id, CancellationToken ct);
     LunarToSolarDto ConvertLunarToSolar(int day, int month, int year, bool isLeapMonth);
+    NextAnniversaryOccurrenceDto GetNextOccurrence(int day, int month, bool isLeapMonth);
 }

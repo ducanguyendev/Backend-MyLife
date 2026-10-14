@@ -47,4 +47,24 @@ public sealed class VietnameseLunarCalendarServiceTests
         Assert.Equal(expected, date);
         Assert.Equal(date.DayNumber - new DateOnly(2024, 1, 1).DayNumber, daysUntil);
     }
+
+    [Theory]
+    [InlineData(2026, 1, 31, 2026, 2, 17)]
+    [InlineData(2026, 12, 20, 2027, 2, 6)]
+    public void Next_occurrence_uses_the_nearest_solar_date_across_gregorian_year_boundaries(
+        int todayYear, int todayMonth, int todayDay, int expectedYear, int expectedMonth, int expectedDay)
+    {
+        var today = new DateOnly(todayYear, todayMonth, todayDay);
+        var (date, daysUntil) = calendar.NextOccurrence(1, 1, false, today);
+        Assert.Equal(new DateOnly(expectedYear, expectedMonth, expectedDay), date);
+        Assert.Equal(date.DayNumber - today.DayNumber, daysUntil);
+    }
+
+    [Fact]
+    public void Current_solar_year_passed_flag_distinguishes_before_and_after_occurrence_in_vietnam_date()
+    {
+        Assert.False(calendar.HasPassedInCurrentSolarYear(1, 1, false, new DateOnly(2026, 2, 16)));
+        Assert.False(calendar.HasPassedInCurrentSolarYear(1, 1, false, new DateOnly(2026, 2, 17)));
+        Assert.True(calendar.HasPassedInCurrentSolarYear(1, 1, false, new DateOnly(2026, 2, 18)));
+    }
 }

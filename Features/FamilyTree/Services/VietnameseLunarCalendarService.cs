@@ -46,6 +46,23 @@ public sealed class VietnameseLunarCalendarService
         throw InvalidDate();
     }
 
+    public bool HasPassedInCurrentSolarYear(int day, int month, bool isLeapMonth, DateOnly? today = null)
+    {
+        var localToday = today ?? GetVietnamToday();
+        var foundCurrentYearOccurrence = false;
+        var allCurrentYearOccurrencesPassed = true;
+        for (var lunarYear = Math.Max(1800, localToday.Year - 1); lunarYear <= Math.Min(2200, localToday.Year + 1); lunarYear++)
+        {
+            DateOnly candidate;
+            try { candidate = ConvertLunarToSolar(day, month, lunarYear, isLeapMonth); }
+            catch (ArgumentException) { continue; }
+            if (candidate.Year != localToday.Year) continue;
+            foundCurrentYearOccurrence = true;
+            if (candidate >= localToday) allCurrentYearOccurrencesPassed = false;
+        }
+        return foundCurrentYearOccurrence && allCurrentYearOccurrencesPassed;
+    }
+
     public DateOnly GetVietnamToday()
     {
         var local = TimeZoneInfo.ConvertTime(timeProvider.GetUtcNow(), VietnamTimeZone);
@@ -144,6 +161,6 @@ public sealed class VietnameseLunarCalendarService
             arc = SunLongitudeSector(NewMoonDay(k + i));
             i++;
         }
-        return i - 1;
+        return i - 2;
     }
 }

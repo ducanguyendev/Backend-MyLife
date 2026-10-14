@@ -249,4 +249,12 @@ Auth login/register/Google: 10 requests/minute/IP; refresh: 30/minute/IP; accoun
 
 `GET /health/live` checks the process only; `GET /health/ready` checks PostgreSQL (200 healthy, 503 unavailable), exposing no connection details. Responses expose a validated/generated X-Request-ID. FamilyTree/Library JSON and health responses support gzip/Brotli when requested; token-issuing auth responses are excluded. No private response output caching is enabled.
 
+## Family anniversaries
+
+All `/api/family-tree/anniversaries` routes require role `USER` and are scoped to the caller's family tree. `GET` lists records with `nextSolarDate` and `daysUntil`; legacy rows with null `originalSolarDate` and `lunarYear` remain readable and use the recurring lunar day/month/leap flag.
+
+Death anniversary writes require `originalSolarDate` (`YYYY-MM-DD`) and `lunarYear` (1800–2200), alongside `lunarDay`, `lunarMonth`, and `isLeapMonth`. The backend converts that full lunar date and requires it to equal the solar date. A mismatch returns `FAMILY_ANNIVERSARY_DATE_MISMATCH`; an invalid date or unavailable leap month returns `FAMILY_ANNIVERSARY_INVALID_LUNAR_DATE`. The original year is historical only; recurring dates use day/month/leap status.
+
+`GET /api/family-tree/anniversaries/next-occurrence?day={1..30}&month={1..12}&isLeapMonth={true|false}` is the authoritative preview. It returns the nearest converted solar date on or after today's date in Vietnam (`nextSolarDate`, `daysUntil`, `solarYear`) and `isCurrentYearPassed`. Unsupported lunar dates and missing leap months are skipped while searching for the next valid occurrence. `GET /api/family-tree/anniversaries/lunar-to-solar?day=&month=&year=&isLeapMonth=` remains available for validating historical date pairs. The calendar algorithm supports lunar years 1800–2200.
+
 Production defaults Database:AutoMigrate to false and fails startup when migrations are pending. Apply reviewed migrations separately before startup; seed runs only with explicitly enabled migration initialization. Development defaults remain convenient. See MYLIFE_WEB_OPTIMIZATION_REPORT.md for the unapplied AddPerUserFamilyTrees migration and review steps.

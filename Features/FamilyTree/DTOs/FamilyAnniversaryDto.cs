@@ -11,6 +11,8 @@ public sealed record FamilyAnniversaryDto(
     int LunarDay,
     int LunarMonth,
     bool IsLeapMonth,
+    DateOnly? OriginalSolarDate,
+    int? LunarYear,
     DateOnly NextSolarDate,
     int DaysUntil,
     string? Place,
@@ -20,3 +22,12 @@ public sealed record FamilyAnniversaryDto(
     DateTime UpdatedAt);
 
 public sealed record LunarToSolarDto(int LunarDay, int LunarMonth, int LunarYear, bool IsLeapMonth, DateOnly SolarDate);
+
+public sealed record NextAnniversaryOccurrenceDto(
+    int LunarDay,
+    int LunarMonth,
+    bool IsLeapMonth,
+    DateOnly NextSolarDate,
+    int DaysUntil,
+    int SolarYear,
+    bool IsCurrentYearPassed);

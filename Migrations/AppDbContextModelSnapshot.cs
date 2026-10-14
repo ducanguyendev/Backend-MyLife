@@ -66,10 +66,18 @@ namespace MyLife.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("lunar_month");
 
+                    b.Property<int?>("LunarYear")
+                        .HasColumnType("integer")
+                        .HasColumnName("lunar_year");
+
                     b.Property<string>("Notes")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)")
                         .HasColumnName("notes");
+
+                    b.Property<DateOnly?>("OriginalSolarDate")
+                        .HasColumnType("date")
+                        .HasColumnName("original_solar_date");
 
                     b.Property<string>("Place")
                         .HasMaxLength(500)
