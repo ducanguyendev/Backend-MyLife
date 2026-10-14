@@ -146,6 +146,10 @@ namespace MyLife.Migrations
                         .HasColumnType("date")
                         .HasColumnName("date_of_birth");
 
+                    b.Property<DateOnly?>("DeathDate")
+                        .HasColumnType("date")
+                        .HasColumnName("death_date");
+
                     b.Property<string>("FacebookUrl")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)")
@@ -187,6 +191,14 @@ namespace MyLife.Migrations
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)")
                         .HasColumnName("instagram_url");
+
+                    b.Property<string>("LifeStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasDefaultValue("LIVING")
+                        .HasColumnName("life_status");
 
                     b.Property<double?>("Latitude")
                         .HasColumnType("double precision")

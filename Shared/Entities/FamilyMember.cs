@@ -27,6 +27,13 @@ namespace MyLife.Shared.Entities
         [Column("date_of_birth")]
         public DateOnly? DateOfBirth { get; set; }
 
+        [Column("life_status")]
+        [MaxLength(16)]
+        public string LifeStatus { get; set; } = "LIVING";
+
+        [Column("death_date")]
+        public DateOnly? DeathDate { get; set; }
+
         [Column("role")]
         [MaxLength(50)]
         public string? Role { get; set; }

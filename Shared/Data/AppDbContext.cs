@@ -234,6 +234,8 @@ namespace MyLife.Shared.Data
                 entity.ToTable("family_members");
                 entity.HasKey(e => e.Id);
                 entity.Property(e => e.Id).HasColumnName("id");
+                entity.Property(e => e.LifeStatus).HasColumnName("life_status").HasMaxLength(16).HasDefaultValue("LIVING").IsRequired();
+                entity.Property(e => e.DeathDate).HasColumnName("death_date");
                 entity.HasOne(e => e.FamilyTree).WithMany(e => e.Members).HasForeignKey(e => e.FamilyTreeId).OnDelete(DeleteBehavior.Restrict);
                 entity.Property(e => e.AvatarDriveFileId).HasColumnName("avatar_drive_file_id").HasMaxLength(255);
                 entity.HasIndex(e => e.FamilyTreeId);

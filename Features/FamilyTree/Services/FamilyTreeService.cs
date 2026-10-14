@@ -6,7 +6,7 @@ using UserFamilyTree = MyLife.Shared.Entities.FamilyTree;
 
 namespace MyLife.Features.FamilyTree.Services;
 
-public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAvatarService avatarStorage, IMemberAvatarImageCache avatarImageCache, ILogger<FamilyTreeService> logger) : IFamilyTreeService
+public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAvatarService avatarStorage, IMemberAvatarImageCache avatarImageCache, ILogger<FamilyTreeService> logger, TimeProvider timeProvider) : IFamilyTreeService
 {
     public async Task<UserFamilyTree> EnsureUserFamilyTreeAsync(int userId, CancellationToken ct)
     {
@@ -45,9 +45,10 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
     public async Task<FamilyMemberDto> CreateMemberAsync(int userId, CreateFamilyMemberDto dto, CancellationToken ct)
     {
         var tree = await EnsureUserFamilyTreeAsync(userId, ct);
+        var (lifeStatus, deathDate) = ValidateLifeStatus(dto.LifeStatus, dto.DeathDate, dto.DateOfBirth);
         await using var transaction = await context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         await ValidateReferencesAsync(tree.Id, null, dto.FatherId, dto.MotherId, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, dto.Gender, ct);
-        var member = new FamilyMember { FamilyTreeId = tree.Id, FullName = dto.FullName.Trim(), Generation = dto.Generation, Gender = dto.Gender, DateOfBirth = dto.DateOfBirth, Role = dto.Role,
+        var member = new FamilyMember { FamilyTreeId = tree.Id, FullName = dto.FullName.Trim(), Generation = dto.Generation, Gender = dto.Gender, DateOfBirth = dto.DateOfBirth, LifeStatus = lifeStatus, DeathDate = deathDate, Role = dto.Role,
             Address = dto.Address, PhoneNumber = dto.PhoneNumber, FacebookUrl = dto.FacebookUrl, InstagramUrl = dto.InstagramUrl, Biography = dto.Biography,
             FatherId = dto.FatherId, MotherId = dto.MotherId, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
         context.FamilyMembers.Add(member); await context.SaveChangesAsync(ct);
@@ -59,10 +60,11 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
     public async Task<FamilyMemberDto> UpdateMemberAsync(int userId, int id, UpdateFamilyMemberDto dto, CancellationToken ct)
     {
         var tree = await EnsureUserFamilyTreeAsync(userId, ct);
+        var (lifeStatus, deathDate) = ValidateLifeStatus(dto.LifeStatus, dto.DeathDate, dto.DateOfBirth);
         await using var transaction = await context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         var member = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == id && x.FamilyTreeId == tree.Id, ct) ?? throw new KeyNotFoundException();
         await ValidateReferencesAsync(tree.Id, id, dto.FatherId, dto.MotherId, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, dto.Gender, ct);
-        member.FullName = dto.FullName.Trim(); member.Generation = dto.Generation; member.Gender = dto.Gender; member.DateOfBirth = dto.DateOfBirth; member.Role = dto.Role;
+        member.FullName = dto.FullName.Trim(); member.Generation = dto.Generation; member.Gender = dto.Gender; member.DateOfBirth = dto.DateOfBirth; member.LifeStatus = lifeStatus; member.DeathDate = deathDate; member.Role = dto.Role;
         var nextAddress = dto.Address?.Trim();
         if (!string.Equals(member.Address?.Trim(), nextAddress, StringComparison.Ordinal))
         {
@@ -304,11 +306,34 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
     private static FamilyMemberDto Map(FamilyMember member)
     {
         var children = member.ChildrenAsFather.Concat(member.ChildrenAsMother).DistinctBy(x => x.Id).ToList();
-        return new FamilyMemberDto { Id = member.Id, FullName = member.FullName, Generation = member.Generation, Gender = member.Gender, DateOfBirth = member.DateOfBirth, Role = member.Role, Address = member.Address,
+        return new FamilyMemberDto { Id = member.Id, FullName = member.FullName, Generation = member.Generation, Gender = member.Gender, DateOfBirth = member.DateOfBirth, LifeStatus = member.LifeStatus, DeathDate = member.DeathDate, Role = member.Role, Address = member.Address,
             PhoneNumber = member.PhoneNumber, FacebookUrl = member.FacebookUrl, InstagramUrl = member.InstagramUrl,
             AvatarUrl = string.IsNullOrWhiteSpace(member.AvatarDriveFileId) ? member.AvatarUrl : null,
             HasManagedAvatar = !string.IsNullOrWhiteSpace(member.AvatarDriveFileId), Biography = member.Biography,
             FatherId = member.FatherId, FatherName = member.Father?.FullName, MotherId = member.MotherId, MotherName = member.Mother?.FullName, SpouseId = member.SpouseId, SpouseName = member.Spouse?.FullName,
             ChildIds = children.Select(x => x.Id).ToList(), ChildNames = children.Select(x => x.FullName).ToList(), HorizontalRelations = member.RelationsAsMember1.Select(x => new HorizontalRelationDto { MemberId = x.Member2Id, RelationType = x.RelationType }).Concat(member.RelationsAsMember2.Select(x => new HorizontalRelationDto { MemberId = x.Member1Id, RelationType = x.RelationType })).ToList(), CreatedAt = member.CreatedAt, UpdatedAt = member.UpdatedAt };
+    }
+
+    private (string LifeStatus, DateOnly? DeathDate) ValidateLifeStatus(string? value, DateOnly? deathDate, DateOnly? dateOfBirth)
+    {
+        var lifeStatus = value is null ? "LIVING" : value.Trim().ToUpperInvariant();
+        if (lifeStatus is not ("LIVING" or "DECEASED"))
+            throw new FamilyTreeValidationException("FAMILY_MEMBER_INVALID_LIFE_STATUS", "Life status must be LIVING or DECEASED.");
+        if (lifeStatus == "LIVING") return (lifeStatus, null);
+        if (deathDate is null)
+            throw new FamilyTreeValidationException("FAMILY_MEMBER_DEATH_DATE_REQUIRED", "A death date is required for a deceased family member.");
+        var vietnamZone = GetVietnamTimeZone();
+        var todayInVietnam = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(timeProvider.GetUtcNow(), vietnamZone).DateTime);
+        if (deathDate.Value > todayInVietnam)
+            throw new FamilyTreeValidationException("FAMILY_MEMBER_DEATH_DATE_FUTURE", "Death date cannot be later than the current date in Vietnam.");
+        if (dateOfBirth is not null && deathDate.Value < dateOfBirth.Value)
+            throw new FamilyTreeValidationException("FAMILY_MEMBER_DEATH_BEFORE_BIRTH", "Death date cannot be earlier than the date of birth.");
+        return (lifeStatus, deathDate);
+    }
+
+    private static TimeZoneInfo GetVietnamTimeZone()
+    {
+        try { return TimeZoneInfo.FindSystemTimeZoneById("Asia/Ho_Chi_Minh"); }
+        catch (TimeZoneNotFoundException) { return TimeZoneInfo.FindSystemTimeZoneById("SE Asia Standard Time"); }
     }
 }

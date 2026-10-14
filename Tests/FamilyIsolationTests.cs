@@ -201,6 +201,8 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
     {
         var a = await User(); var b = await User();
         var aMember = await Create(a.Token, "Ancestor A"); var bMember = await Create(b.Token, "Ancestor B");
+        using (var deceased = await Send(a.Token, HttpMethod.Put, $"/api/family-tree/{aMember}", Member("Ancestor A", new() { ["lifeStatus"] = " deceased ", ["deathDate"] = "2024-02-10" })))
+            Assert.Equal(HttpStatusCode.OK, deceased.StatusCode);
         using (var anonymous = await client.GetAsync("/api/family-tree/anniversaries")) Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
         var admin = await AdminToken();
         using (var adminResponse = await Send(admin, HttpMethod.Get, "/api/family-tree/anniversaries")) Assert.Equal(HttpStatusCode.Forbidden, adminResponse.StatusCode);
@@ -265,6 +267,91 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         using (var deleted = await Send(a.Token, HttpMethod.Delete, $"/api/family-tree/anniversaries/{id}")) Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
         using var missing = await Send(a.Token, HttpMethod.Get, $"/api/family-tree/anniversaries/{id}");
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    [Fact]
+    public async Task Member_life_status_and_death_date_are_validated_and_persisted_on_create_and_update()
+    {
+        var user = await User();
+        var livingId = await Create(user.Token, "Living by default");
+        var living = (await List(user.Token)).Single(m => m.GetProperty("id").GetInt32() == livingId);
+        Assert.Equal("LIVING", living.GetProperty("lifeStatus").GetString());
+        Assert.Equal(JsonValueKind.Null, living.GetProperty("deathDate").ValueKind);
+
+        using (var invalidStatus = await Send(user.Token, HttpMethod.Post, "/api/family-tree", Member("Bad status", new() { ["lifeStatus"] = "unknown" })))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, invalidStatus.StatusCode);
+            Assert.Equal("FAMILY_MEMBER_INVALID_LIFE_STATUS", (await Body(invalidStatus)).GetProperty("code").GetString());
+        }
+        using (var emptyStatus = await Send(user.Token, HttpMethod.Post, "/api/family-tree", Member("Empty status", new() { ["lifeStatus"] = " " })))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, emptyStatus.StatusCode);
+            Assert.Equal("FAMILY_MEMBER_INVALID_LIFE_STATUS", (await Body(emptyStatus)).GetProperty("code").GetString());
+        }
+        using (var missingDate = await Send(user.Token, HttpMethod.Post, "/api/family-tree", Member("Missing date", new() { ["lifeStatus"] = "DECEASED" })))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, missingDate.StatusCode);
+            Assert.Equal("FAMILY_MEMBER_DEATH_DATE_REQUIRED", (await Body(missingDate)).GetProperty("code").GetString());
+        }
+
+        using (var ignoredDate = await Send(user.Token, HttpMethod.Post, "/api/family-tree", Member("Living stale date", new() { ["deathDate"] = "2000-01-01" })))
+        {
+            Assert.Equal(HttpStatusCode.Created, ignoredDate.StatusCode);
+            Assert.Equal(JsonValueKind.Null, (await Body(ignoredDate)).GetProperty("data").GetProperty("deathDate").ValueKind);
+        }
+        var sameDay = new Dictionary<string, object?> { ["lifeStatus"] = "DECEASED", ["deathDate"] = "2024-02-10", ["dateOfBirth"] = "2024-02-10" };
+        var deceasedId = await Create(user.Token, "Same day", sameDay);
+        var created = (await List(user.Token)).Single(m => m.GetProperty("id").GetInt32() == deceasedId);
+        Assert.Equal("DECEASED", created.GetProperty("lifeStatus").GetString());
+        Assert.Equal("2024-02-10", created.GetProperty("deathDate").GetString());
+
+        var tomorrow = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(3).ToString("yyyy-MM-dd");
+        using (var future = await Send(user.Token, HttpMethod.Post, "/api/family-tree", Member("Future date", new() { ["lifeStatus"] = "DECEASED", ["deathDate"] = tomorrow })))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, future.StatusCode);
+            Assert.Equal("FAMILY_MEMBER_DEATH_DATE_FUTURE", (await Body(future)).GetProperty("code").GetString());
+        }
+        using (var beforeBirth = await Send(user.Token, HttpMethod.Post, "/api/family-tree", Member("Before birth", new() { ["lifeStatus"] = "DECEASED", ["deathDate"] = "2011-08-18", ["dateOfBirth"] = "2011-08-19" })))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, beforeBirth.StatusCode);
+            Assert.Equal("FAMILY_MEMBER_DEATH_BEFORE_BIRTH", (await Body(beforeBirth)).GetProperty("code").GetString());
+        }
+
+        using (var transitioned = await Send(user.Token, HttpMethod.Put, $"/api/family-tree/{livingId}", Member("Living by default", new() { ["lifeStatus"] = " deceased ", ["deathDate"] = "2024-02-10" })))
+            Assert.Equal("DECEASED", (await Body(transitioned)).GetProperty("data").GetProperty("lifeStatus").GetString());
+        using (var resetLiving = await Send(user.Token, HttpMethod.Put, $"/api/family-tree/{livingId}", Member("Living by default", new() { ["lifeStatus"] = "LIVING", ["deathDate"] = "2024-02-10" })))
+        {
+            var data = (await Body(resetLiving)).GetProperty("data");
+            Assert.Equal("LIVING", data.GetProperty("lifeStatus").GetString());
+            Assert.Equal(JsonValueKind.Null, data.GetProperty("deathDate").ValueKind);
+        }
+    }
+
+    [Fact]
+    public async Task Death_anniversary_requires_deceased_related_member_and_matching_solar_date()
+    {
+        var user = await User();
+        var livingId = await Create(user.Token, "Living member");
+        using (var forbidden = await Send(user.Token, HttpMethod.Post, "/api/family-tree/anniversaries", Anniversary("Living memorial", livingId)))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, forbidden.StatusCode);
+            Assert.Equal("FAMILY_ANNIVERSARY_MEMBER_NOT_DECEASED", (await Body(forbidden)).GetProperty("code").GetString());
+        }
+        var deceasedId = await Create(user.Token, "Deceased member", new() { ["lifeStatus"] = "DECEASED", ["deathDate"] = "2024-02-11" });
+        using (var mismatch = await Send(user.Token, HttpMethod.Post, "/api/family-tree/anniversaries", Anniversary("Wrong solar date", deceasedId)))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, mismatch.StatusCode);
+            Assert.Equal("FAMILY_ANNIVERSARY_DEATH_DATE_MISMATCH", (await Body(mismatch)).GetProperty("code").GetString());
+        }
+        using (var corrected = await Send(user.Token, HttpMethod.Put, $"/api/family-tree/{deceasedId}", Member("Deceased member", new() { ["lifeStatus"] = "DECEASED", ["deathDate"] = "2024-02-10" })))
+            Assert.Equal(HttpStatusCode.OK, corrected.StatusCode);
+        using (var matching = await Send(user.Token, HttpMethod.Post, "/api/family-tree/anniversaries", Anniversary("Matching solar date", deceasedId)))
+            Assert.Equal(HttpStatusCode.Created, matching.StatusCode);
+
+        var familyEvent = Anniversary("Family event", livingId);
+        familyEvent["eventType"] = "FAMILY_EVENT";
+        using var allowed = await Send(user.Token, HttpMethod.Post, "/api/family-tree/anniversaries", familyEvent);
+        Assert.Equal(HttpStatusCode.Created, allowed.StatusCode);
     }
 
     [Fact]

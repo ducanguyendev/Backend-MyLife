@@ -16,6 +16,8 @@ namespace MyLife.Features.FamilyTree.DTOs
         public int Generation { get; set; }
         public string? Gender { get; set; }
         public DateOnly? DateOfBirth { get; set; }
+        public string LifeStatus { get; set; } = "LIVING";
+        public DateOnly? DeathDate { get; set; }
         public string? Role { get; set; }
         public string? Address { get; set; }
         public string? PhoneNumber { get; set; }

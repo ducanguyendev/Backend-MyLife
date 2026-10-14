@@ -197,6 +197,8 @@ Family-tree responses wrap payloads in `{ success, data }`. All routes require r
 
 Each USER has one private FamilyTree, lazily created by the first member request. The server resolves its unique owner from the validated session; clients cannot select an owner or FamilyTreeId. Member list/detail/update/delete and all relationship validation are scoped to that tree. A missing or foreign member ID returns 404 `FAMILY_MEMBER_NOT_FOUND`; a foreign father/mother/spouse/child/horizontal reference returns 400 `FAMILY_RELATED_MEMBER_NOT_FOUND`. Names can repeat across trees. Generation records remain a shared read-only reference catalog.
 
+Family member read, create and update payloads include `lifeStatus` (`LIVING` or `DECEASED`) and nullable `deathDate` (`YYYY-MM-DD`). Omitted status defaults to `LIVING`; the server trims and uppercases supported status values. Living members always have `deathDate: null`. Deceased members require a date no later than today's date in Vietnam and no earlier than `dateOfBirth` when one is recorded. Invalid values return `FAMILY_MEMBER_INVALID_LIFE_STATUS`, `FAMILY_MEMBER_DEATH_DATE_REQUIRED`, `FAMILY_MEMBER_DEATH_DATE_FUTURE`, or `FAMILY_MEMBER_DEATH_BEFORE_BIRTH`.
+
 The legacy `/api/admin/family-tree` route family has been removed (404); it cannot be used to bypass the USER requirement.
 
 FamilyTree codes: `FAMILY_MEMBER_NOT_FOUND`, `FAMILY_RELATED_MEMBER_NOT_FOUND`,
@@ -254,6 +256,8 @@ Auth login/register/Google: 10 requests/minute/IP; refresh: 30/minute/IP; accoun
 All `/api/family-tree/anniversaries` routes require role `USER` and are scoped to the caller's family tree. `GET` lists records with `nextSolarDate` and `daysUntil`; legacy rows with null `originalSolarDate` and `lunarYear` remain readable and use the recurring lunar day/month/leap flag.
 
 Death anniversary writes require `originalSolarDate` (`YYYY-MM-DD`) and `lunarYear` (1800–2200), alongside `lunarDay`, `lunarMonth`, and `isLeapMonth`. The backend converts that full lunar date and requires it to equal the solar date. A mismatch returns `FAMILY_ANNIVERSARY_DATE_MISMATCH`; an invalid date or unavailable leap month returns `FAMILY_ANNIVERSARY_INVALID_LUNAR_DATE`. The original year is historical only; recurring dates use day/month/leap status.
+
+When a death anniversary links `relatedMemberId`, that member must belong to the caller's tree, have `lifeStatus: DECEASED`, and have a `deathDate` matching `originalSolarDate`. Failures return `FAMILY_ANNIVERSARY_MEMBER_NOT_DECEASED`, `FAMILY_ANNIVERSARY_MEMBER_DEATH_DATE_REQUIRED`, or `FAMILY_ANNIVERSARY_DEATH_DATE_MISMATCH`. `FAMILY_EVENT` may link any member in the caller's tree; a null member remains valid for either event type.
 
 `GET /api/family-tree/anniversaries/next-occurrence?day={1..30}&month={1..12}&isLeapMonth={true|false}` is the authoritative preview. It returns the nearest converted solar date on or after today's date in Vietnam (`nextLunarYear`, `nextSolarDate`, `daysUntil`, `solarYear`) and `isCurrentYearPassed`. Unsupported lunar dates and missing leap months are skipped while searching for the next valid occurrence. `GET /api/family-tree/anniversaries/lunar-to-solar?day=&month=&year=&isLeapMonth=` remains available for validating historical date pairs. The calendar algorithm supports lunar years 1800–2200.
 

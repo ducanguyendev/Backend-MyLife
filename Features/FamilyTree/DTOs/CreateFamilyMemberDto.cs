@@ -19,6 +19,9 @@ namespace MyLife.Features.FamilyTree.DTOs
 
         public DateOnly? DateOfBirth { get; set; }
 
+        public string? LifeStatus { get; set; } = "LIVING";
+        public DateOnly? DeathDate { get; set; }
+
         [MaxLength(50)]
         public string? Role { get; set; }
 

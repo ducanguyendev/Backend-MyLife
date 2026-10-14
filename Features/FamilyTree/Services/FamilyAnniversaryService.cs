@@ -34,6 +34,7 @@ public sealed class FamilyAnniversaryService(
         var values = Validate(dto);
         ValidateOriginalDate(values.EventType, dto);
         var member = await ResolveMember(tree.Id, dto.RelatedMemberId, ct);
+        ValidateRelatedMember(values.EventType, dto.OriginalSolarDate, member);
         EnsureRecurringDate(values.LunarDay, values.LunarMonth, dto.IsLeapMonth);
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var entity = new FamilyAnniversary
@@ -57,6 +58,7 @@ public sealed class FamilyAnniversaryService(
         var values = Validate(dto);
         ValidateOriginalDate(values.EventType, dto);
         var member = await ResolveMember(tree.Id, dto.RelatedMemberId, ct);
+        ValidateRelatedMember(values.EventType, dto.OriginalSolarDate, member);
         EnsureRecurringDate(values.LunarDay, values.LunarMonth, dto.IsLeapMonth);
         entity.EventType = values.EventType; entity.Title = values.Title; entity.RelatedMemberId = member?.Id;
         entity.LunarDay = values.LunarDay; entity.LunarMonth = values.LunarMonth; entity.IsLeapMonth = dto.IsLeapMonth;
@@ -102,6 +104,17 @@ public sealed class FamilyAnniversaryService(
         if (memberId is null) return null;
         return await db.FamilyMembers.SingleOrDefaultAsync(m => m.Id == memberId && m.FamilyTreeId == treeId, ct)
             ?? throw new KeyNotFoundException("Related family member not found.");
+    }
+
+    private static void ValidateRelatedMember(string eventType, DateOnly? originalSolarDate, FamilyMember? member)
+    {
+        if (eventType != "DEATH_ANNIVERSARY" || member is null) return;
+        if (member.LifeStatus != "DECEASED")
+            throw Invalid("FAMILY_ANNIVERSARY_MEMBER_NOT_DECEASED", "A death anniversary can only be linked to a deceased family member.");
+        if (member.DeathDate is null)
+            throw Invalid("FAMILY_ANNIVERSARY_MEMBER_DEATH_DATE_REQUIRED", "The linked deceased family member must have a death date in their profile.");
+        if (originalSolarDate != member.DeathDate)
+            throw Invalid("FAMILY_ANNIVERSARY_DEATH_DATE_MISMATCH", "The original solar date must match the linked family member's death date.");
     }
 
     private (string EventType, string Title, int LunarDay, int LunarMonth, string? Place, string? Host, string? Notes) Validate(FamilyAnniversaryWriteDto dto)
