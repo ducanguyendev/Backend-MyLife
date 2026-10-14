@@ -110,6 +110,13 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
         var valid = new { fullName = "Code Test", phoneNumber = "0912345678", gender = "Nam", dateOfBirth = "1995-05-20", email, password, confirmPassword = password };
         Assert.Equal(HttpStatusCode.Created, (await Post("/api/auth/register", valid)).StatusCode);
 
+        using var missingFullName = await Post("/api/auth/register", new
+        {
+            phoneNumber = valid.phoneNumber, gender = valid.gender, dateOfBirth = valid.dateOfBirth,
+            email = $"missing-name.{Guid.NewGuid():N}@gmail.com", password, confirmPassword = password
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, missingFullName.StatusCode);
+
         await AssertCode(HttpStatusCode.Conflict, "AUTH_EMAIL_ALREADY_REGISTERED", valid);
         await AssertCode(HttpStatusCode.BadRequest, "AUTH_PASSWORD_MISMATCH", new { valid.fullName, valid.phoneNumber, valid.gender, valid.dateOfBirth, email = $"mismatch.{Guid.NewGuid():N}@gmail.com", password, confirmPassword = "Other_Test!234567" });
         await AssertCode(HttpStatusCode.BadRequest, "AUTH_PASSWORD_TOO_LONG", new { valid.fullName, valid.phoneNumber, valid.gender, valid.dateOfBirth, email = $"long.{Guid.NewGuid():N}@gmail.com", password = new string('a', 73), confirmPassword = new string('a', 73) });
@@ -137,12 +144,27 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
 
         using var update = await Put("/api/me/profile", new
         {
-            displayName = "  Duca  ", phoneNumber = "0912345678", gender = "Nam", dateOfBirth = "1995-05-20"
+            displayName = "  Dukaa  ", phoneNumber = "0987654321", gender = "Nữ", dateOfBirth = "1995-05-21"
         }, token);
         Assert.Equal(HttpStatusCode.OK, update.StatusCode);
         var updatedUser = (await Body(update)).GetProperty("user");
-        Assert.Equal("Duca", updatedUser.GetProperty("displayName").GetString());
+        Assert.Equal("Dukaa", updatedUser.GetProperty("displayName").GetString());
         Assert.Equal("Nguyễn Huỳnh Minh Đức", updatedUser.GetProperty("fullName").GetString());
+        Assert.Equal("0987654321", updatedUser.GetProperty("phoneNumber").GetString());
+        Assert.Equal("Nữ", updatedUser.GetProperty("gender").GetString());
+        Assert.Equal("1995-05-21", updatedUser.GetProperty("dateOfBirth").GetString());
+
+        using var currentUserResponse = await Get("/api/me", token);
+        Assert.Equal(HttpStatusCode.OK, currentUserResponse.StatusCode);
+        var currentUser = await Body(currentUserResponse);
+        Assert.Equal("Nguyễn Huỳnh Minh Đức", currentUser.GetProperty("fullName").GetString());
+        Assert.Equal("Dukaa", currentUser.GetProperty("displayName").GetString());
+
+        using var blankDisplayName = await Put("/api/me/profile", new
+        {
+            displayName = "  ", phoneNumber = "0987654321", gender = "Nữ", dateOfBirth = "1995-05-21"
+        }, token);
+        Assert.Equal(HttpStatusCode.BadRequest, blankDisplayName.StatusCode);
     }
 
     [Fact]

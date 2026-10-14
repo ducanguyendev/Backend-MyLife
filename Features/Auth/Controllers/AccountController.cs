@@ -134,7 +134,7 @@ public sealed class AccountController : ControllerBase
         if (!ModelState.IsValid) return ValidationProblem(ModelState);
         var user = await CurrentUserAsync();
         if (user is null || !user.IsActive) return Unauthorized(Error("Session is invalid."));
-        var displayName = DisplayNameGenerator.NormalizeWhitespace(model.DisplayName ?? model.FullName);
+        var displayName = DisplayNameGenerator.NormalizeWhitespace(model.DisplayName);
         if (displayName.Length is < 1 or > 100) return BadRequest(Error("PROFILE_DISPLAY_NAME_REQUIRED", "Display name must contain between 1 and 100 characters."));
         user.DisplayName = displayName; user.PhoneNumber = model.PhoneNumber.Trim(); user.Gender = model.Gender.Trim(); user.DateOfBirth = model.DateOfBirth; user.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(); return Ok(new { success = true, message = "Profile updated.", user = ToUserDto(user) });
