@@ -87,8 +87,8 @@ public sealed class FamilyAnniversaryService(
         var today = calendar.GetVietnamToday();
         try
         {
-            var (solarDate, daysUntil) = calendar.NextOccurrence(day, month, isLeapMonth, today);
-            return new(day, month, isLeapMonth, solarDate, daysUntil, solarDate.Year,
+            var (lunarYear, solarDate, daysUntil) = calendar.NextOccurrence(day, month, isLeapMonth, today);
+            return new(day, month, isLeapMonth, lunarYear, solarDate, daysUntil, solarDate.Year,
                 calendar.HasPassedInCurrentSolarYear(day, month, isLeapMonth, today));
         }
         catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
@@ -145,12 +145,12 @@ public sealed class FamilyAnniversaryService(
 
     private FamilyAnniversaryDto Map(FamilyAnniversary item, DateOnly today)
     {
-        (DateOnly next, int daysUntil) occurrence;
+        (int lunarYear, DateOnly next, int daysUntil) occurrence;
         try { occurrence = calendar.NextOccurrence(item.LunarDay, item.LunarMonth, item.IsLeapMonth, today); }
         catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
         return new(item.Id, item.EventType, item.Title, item.RelatedMemberId,
             item.RelatedMember?.FullName, item.RelatedMember?.Generation, item.RelatedMember?.Role,
-            item.LunarDay, item.LunarMonth, item.IsLeapMonth, item.OriginalSolarDate, item.LunarYear, occurrence.next, occurrence.daysUntil,
+            item.LunarDay, item.LunarMonth, item.IsLeapMonth, item.OriginalSolarDate, item.LunarYear, occurrence.lunarYear, occurrence.next, occurrence.daysUntil,
             item.Place, item.Host, item.Notes, item.CreatedAt, item.UpdatedAt);
     }
 

@@ -25,10 +25,12 @@ public sealed class VietnameseLunarCalendarServiceTests
     [Fact]
     public void Next_occurrence_includes_today_and_calculates_countdown()
     {
-        var (today, todayDays) = calendar.NextOccurrence(1, 1, false, new DateOnly(2024, 2, 10));
-        var (next, nextDays) = calendar.NextOccurrence(1, 1, false, new DateOnly(2024, 2, 11));
+        var (todayYear, today, todayDays) = calendar.NextOccurrence(1, 1, false, new DateOnly(2024, 2, 10));
+        var (nextYear, next, nextDays) = calendar.NextOccurrence(1, 1, false, new DateOnly(2024, 2, 11));
+        Assert.Equal(2024, todayYear);
         Assert.Equal(new DateOnly(2024, 2, 10), today);
         Assert.Equal(0, todayDays);
+        Assert.Equal(2025, nextYear);
         Assert.Equal(new DateOnly(2025, 1, 29), next);
         Assert.Equal(353, nextDays);
     }
@@ -37,26 +39,29 @@ public sealed class VietnameseLunarCalendarServiceTests
     public void Next_leap_month_occurrence_skips_years_without_that_leap_month()
     {
         DateOnly? expected = null;
+        var expectedLunarYear = 0;
         for (var year = 2024; year <= 2044 && expected is null; year++)
         {
-            try { expected = calendar.ConvertLunarToSolar(1, 2, year, true); }
+            try { expected = calendar.ConvertLunarToSolar(1, 2, year, true); expectedLunarYear = year; }
             catch (ArgumentException) { }
         }
         Assert.NotNull(expected);
-        var (date, daysUntil) = calendar.NextOccurrence(1, 2, true, new DateOnly(2024, 1, 1));
+        var (lunarYear, date, daysUntil) = calendar.NextOccurrence(1, 2, true, new DateOnly(2024, 1, 1));
         Assert.Equal(expected, date);
+        Assert.Equal(expectedLunarYear, lunarYear);
         Assert.Equal(date.DayNumber - new DateOnly(2024, 1, 1).DayNumber, daysUntil);
     }
 
     [Theory]
-    [InlineData(2026, 1, 31, 2026, 2, 17)]
-    [InlineData(2026, 12, 20, 2027, 2, 6)]
+    [InlineData(2026, 1, 31, 2026, 2, 17, 2026)]
+    [InlineData(2026, 12, 20, 2027, 2, 6, 2027)]
     public void Next_occurrence_uses_the_nearest_solar_date_across_gregorian_year_boundaries(
-        int todayYear, int todayMonth, int todayDay, int expectedYear, int expectedMonth, int expectedDay)
+        int todayYear, int todayMonth, int todayDay, int expectedYear, int expectedMonth, int expectedDay, int expectedLunarYear)
     {
         var today = new DateOnly(todayYear, todayMonth, todayDay);
-        var (date, daysUntil) = calendar.NextOccurrence(1, 1, false, today);
+        var (lunarYear, date, daysUntil) = calendar.NextOccurrence(1, 1, false, today);
         Assert.Equal(new DateOnly(expectedYear, expectedMonth, expectedDay), date);
+        Assert.Equal(expectedLunarYear, lunarYear);
         Assert.Equal(date.DayNumber - today.DayNumber, daysUntil);
     }
 

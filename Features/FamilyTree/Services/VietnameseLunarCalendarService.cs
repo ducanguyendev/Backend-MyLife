@@ -33,7 +33,7 @@ public sealed class VietnameseLunarCalendarService
         return DateFromJulianDay(monthStart + day - 1);
     }
 
-    public (DateOnly SolarDate, int DaysUntil) NextOccurrence(int day, int month, bool isLeapMonth, DateOnly? today = null)
+    public (int LunarYear, DateOnly SolarDate, int DaysUntil) NextOccurrence(int day, int month, bool isLeapMonth, DateOnly? today = null)
     {
         var localToday = today ?? GetVietnamToday();
         for (var year = Math.Max(1800, localToday.Year - 1); year <= Math.Min(2200, localToday.Year + 20); year++)
@@ -41,7 +41,7 @@ public sealed class VietnameseLunarCalendarService
             DateOnly candidate;
             try { candidate = ConvertLunarToSolar(day, month, year, isLeapMonth); }
             catch (ArgumentException) { continue; } // The requested leap month/date does not occur in this lunar year.
-            if (candidate >= localToday) return (candidate, candidate.DayNumber - localToday.DayNumber);
+            if (candidate >= localToday) return (year, candidate, candidate.DayNumber - localToday.DayNumber);
         }
         throw InvalidDate();
     }

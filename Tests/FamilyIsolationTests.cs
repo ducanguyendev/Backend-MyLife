@@ -290,6 +290,7 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         Assert.Equal(JsonValueKind.Null, legacy.GetProperty("originalSolarDate").ValueKind);
         Assert.Equal(JsonValueKind.Null, legacy.GetProperty("lunarYear").ValueKind);
         Assert.False(string.IsNullOrWhiteSpace(legacy.GetProperty("nextSolarDate").GetString()));
+        Assert.InRange(legacy.GetProperty("nextLunarYear").GetInt32(), 1800, 2200);
         Assert.True(legacy.GetProperty("daysUntil").GetInt32() >= 0);
     }
 
