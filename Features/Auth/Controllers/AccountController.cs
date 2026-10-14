@@ -68,7 +68,9 @@ public sealed class AccountController : ControllerBase
         if (age is < 6 or > 120) return BadRequest(Error("AUTH_DOB_INVALID", "Date of birth is invalid."));
         var role = await _db.Roles.SingleOrDefaultAsync(r => r.Name == AppRoles.User);
         if (role is null) return StatusCode(503, Error("AUTH_SERVICE_NOT_INITIALIZED", "The service has not been initialized."));
-        var user = new AppUser { Email = email, PasswordHash = BCrypt.Net.BCrypt.HashPassword(model.Password, workFactor: 11), FullName = model.FullName.Trim(),
+        var fullName = model.FullName.Trim();
+        var user = new AppUser { Email = email, PasswordHash = BCrypt.Net.BCrypt.HashPassword(model.Password, workFactor: 11), FullName = fullName,
+            DisplayName = DisplayNameGenerator.Generate(fullName),
             PhoneNumber = model.PhoneNumber.Trim(), Gender = model.Gender.Trim(), DateOfBirth = model.DateOfBirth, AuthProvider = 0, HasLocalProvider = true, IsActive = true,
             VerifiedAt = DateTime.UtcNow, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
         _db.Users.Add(user); _db.UserRoles.Add(new UserRole { User = user, Role = role });
@@ -91,8 +93,9 @@ public sealed class AccountController : ControllerBase
             {
                 var role = await _db.Roles.SingleOrDefaultAsync(r => r.Name == AppRoles.User);
                 if (role is null) return StatusCode(503, Error("The service has not been initialized."));
+                var fullName = string.IsNullOrWhiteSpace(identity.Name) ? email.Split('@')[0] : identity.Name.Trim();
                 user = new AppUser { Email = email, PasswordHash = BCrypt.Net.BCrypt.HashPassword(Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), workFactor: 11),
-                    FullName = identity.Name, AuthProvider = 1, HasGoogleProvider = true, GoogleSubject = identity.Subject, IsActive = true, VerifiedAt = DateTime.UtcNow,
+                    FullName = fullName, DisplayName = DisplayNameGenerator.Generate(fullName), AuthProvider = 1, HasGoogleProvider = true, GoogleSubject = identity.Subject, IsActive = true, VerifiedAt = DateTime.UtcNow,
                     CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow, UserRoles = [new UserRole { Role = role }] };
                 _db.Users.Add(user); await _db.SaveChangesAsync();
             }
@@ -131,7 +134,9 @@ public sealed class AccountController : ControllerBase
         if (!ModelState.IsValid) return ValidationProblem(ModelState);
         var user = await CurrentUserAsync();
         if (user is null || !user.IsActive) return Unauthorized(Error("Session is invalid."));
-        user.FullName = model.FullName.Trim(); user.PhoneNumber = model.PhoneNumber.Trim(); user.Gender = model.Gender.Trim(); user.DateOfBirth = model.DateOfBirth; user.UpdatedAt = DateTime.UtcNow;
+        var displayName = DisplayNameGenerator.NormalizeWhitespace(model.DisplayName ?? model.FullName);
+        if (displayName.Length is < 1 or > 100) return BadRequest(Error("PROFILE_DISPLAY_NAME_REQUIRED", "Display name must contain between 1 and 100 characters."));
+        user.DisplayName = displayName; user.PhoneNumber = model.PhoneNumber.Trim(); user.Gender = model.Gender.Trim(); user.DateOfBirth = model.DateOfBirth; user.UpdatedAt = DateTime.UtcNow;
         await _db.SaveChangesAsync(); return Ok(new { success = true, message = "Profile updated.", user = ToUserDto(user) });
     }
 
@@ -207,7 +212,7 @@ public sealed class AccountController : ControllerBase
     public async Task<IActionResult> AdminUsers([FromQuery] string? search)
     {
         var query = UserWithRoles().AsNoTracking();
-        if (!string.IsNullOrWhiteSpace(search)) { var term = search.Trim(); query = query.Where(x => EF.Functions.ILike(x.Email, $"%{term}%") || (x.FullName != null && EF.Functions.ILike(x.FullName, $"%{term}%"))); }
+        if (!string.IsNullOrWhiteSpace(search)) { var term = search.Trim(); query = query.Where(x => EF.Functions.ILike(x.Email, $"%{term}%") || (x.FullName != null && EF.Functions.ILike(x.FullName, $"%{term}%")) || EF.Functions.ILike(x.DisplayName, $"%{term}%")); }
         return Ok((await query.OrderByDescending(x => x.CreatedAt).ToListAsync()).Select(ToUserDto));
     }
 
@@ -291,7 +296,7 @@ public sealed class AccountController : ControllerBase
     private static object Error(string message) => new { success = false, message };
     private static object Error(string code, string message) => new { success = false, code, message };
     private int AccessSeconds => _configuration.GetValue<int>("JwtSettings:AccessTokenSeconds"); private int RefreshMinutes => _configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes");
-    private object ToUserDto(AppUser user) => new { id = user.Id, email = user.Email, fullName = user.FullName, name = string.IsNullOrWhiteSpace(user.FullName) ? user.Email.Split('@')[0] : user.FullName, phoneNumber = user.PhoneNumber, gender = user.Gender, dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"), avatarUrl = user.AvatarUrl, role = PrimaryRole(user), roles = new[] { PrimaryRole(user) }, authProvider = user.AuthProvider, authProviderName = user.AuthProvider == 1 ? "GOOGLE" : "LOCAL", loginProviders = new { local = user.HasLocalProvider, google = user.HasGoogleProvider }, isActive = user.IsActive, verifiedAt = user.VerifiedAt, createdAt = user.CreatedAt, updatedAt = user.UpdatedAt };
+    private object ToUserDto(AppUser user) => new { id = user.Id, email = user.Email, fullName = user.FullName, displayName = user.DisplayName, name = user.DisplayName, phoneNumber = user.PhoneNumber, gender = user.Gender, dateOfBirth = user.DateOfBirth?.ToString("yyyy-MM-dd"), avatarUrl = user.AvatarUrl, role = PrimaryRole(user), roles = new[] { PrimaryRole(user) }, authProvider = user.AuthProvider, authProviderName = user.AuthProvider == 1 ? "GOOGLE" : "LOCAL", loginProviders = new { local = user.HasLocalProvider, google = user.HasGoogleProvider }, isActive = user.IsActive, verifiedAt = user.VerifiedAt, createdAt = user.CreatedAt, updatedAt = user.UpdatedAt };
     private void SetAuthCookies(string access, string refresh)
     {
         Response.Cookies.Append("AccessToken", access, CookieOptions(DateTimeOffset.UtcNow.AddSeconds(AccessSeconds)));

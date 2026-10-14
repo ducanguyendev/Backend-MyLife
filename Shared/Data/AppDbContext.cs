@@ -97,6 +97,7 @@ namespace MyLife.Shared.Data
                 entity.HasIndex(e => e.Email).IsUnique();
                 entity.Property(e => e.PasswordHash).HasColumnName("password_hash").HasMaxLength(255).IsRequired();
                 entity.Property(e => e.FullName).HasColumnName("full_name").HasMaxLength(100);
+                entity.Property(e => e.DisplayName).HasColumnName("display_name").HasMaxLength(100).IsRequired();
                 entity.Property(e => e.PhoneNumber).HasColumnName("phone_number").HasMaxLength(20);
                 entity.Property(e => e.Gender).HasColumnName("gender").HasMaxLength(20);
                 entity.Property(e => e.DateOfBirth).HasColumnName("date_of_birth");

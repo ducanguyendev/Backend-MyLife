@@ -192,6 +192,10 @@ namespace MyLife.Migrations
                         .HasColumnType("character varying(255)")
                         .HasColumnName("instagram_url");
 
+                    b.Property<double?>("Latitude")
+                        .HasColumnType("double precision")
+                        .HasColumnName("latitude");
+
                     b.Property<string>("LifeStatus")
                         .IsRequired()
                         .ValueGeneratedOnAdd()
@@ -199,10 +203,6 @@ namespace MyLife.Migrations
                         .HasColumnType("character varying(16)")
                         .HasDefaultValue("LIVING")
                         .HasColumnName("life_status");
-
-                    b.Property<double?>("Latitude")
-                        .HasColumnType("double precision")
-                        .HasColumnName("latitude");
 
                     b.Property<string>("LocationDisplayName")
                         .HasMaxLength(500)
@@ -723,6 +723,12 @@ namespace MyLife.Migrations
                     b.Property<DateOnly?>("DateOfBirth")
                         .HasColumnType("date")
                         .HasColumnName("date_of_birth");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("display_name");
 
                     b.Property<string>("Email")
                         .IsRequired()

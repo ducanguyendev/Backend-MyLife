@@ -117,6 +117,63 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
         await AssertCode(HttpStatusCode.BadRequest, "AUTH_DOB_INVALID", new { valid.fullName, valid.phoneNumber, valid.gender, dateOfBirth = "not-a-date", email = $"dob.{Guid.NewGuid():N}@gmail.com", password, confirmPassword = password });
     }
 
+    [Fact]
+    public async Task Registration_and_profile_update_keep_full_name_separate_from_display_name()
+    {
+        var email = $"display-name.{Guid.NewGuid():N}@gmail.com";
+        const string password = "User_Test!234567";
+        using var registration = await Post("/api/auth/register", new
+        {
+            fullName = "Nguyễn Huỳnh Minh Đức", phoneNumber = "0912345678", gender = "Nam",
+            dateOfBirth = "1995-05-20", email, password, confirmPassword = password
+        });
+        Assert.Equal(HttpStatusCode.Created, registration.StatusCode);
+
+        using var login = await LoginResponse(email, password);
+        var session = await Body(login);
+        Assert.Equal("Nguyễn Huỳnh Minh Đức", session.GetProperty("user").GetProperty("fullName").GetString());
+        Assert.Equal("Nguyễn Đức", session.GetProperty("user").GetProperty("displayName").GetString());
+        var token = session.GetProperty("accessToken").GetString()!;
+
+        using var update = await Put("/api/me/profile", new
+        {
+            displayName = "  Duca  ", phoneNumber = "0912345678", gender = "Nam", dateOfBirth = "1995-05-20"
+        }, token);
+        Assert.Equal(HttpStatusCode.OK, update.StatusCode);
+        var updatedUser = (await Body(update)).GetProperty("user");
+        Assert.Equal("Duca", updatedUser.GetProperty("displayName").GetString());
+        Assert.Equal("Nguyễn Huỳnh Minh Đức", updatedUser.GetProperty("fullName").GetString());
+    }
+
+    [Fact]
+    public async Task Google_creation_derives_display_name_and_relogin_preserves_custom_name()
+    {
+        var email = $"google-display.{Guid.NewGuid():N}@gmail.com";
+        const string subject = "display-name-google-subject";
+        const string googleName = "Nguyễn Huỳnh Minh Đức";
+        var googleToken = $"test|{email}|{subject}|picture|{googleName}";
+
+        using var firstLogin = await Post("/api/auth/google", new { idToken = googleToken });
+        Assert.Equal(HttpStatusCode.OK, firstLogin.StatusCode);
+        var firstBody = await Body(firstLogin);
+        var firstUser = firstBody.GetProperty("user");
+        Assert.Equal(googleName, firstUser.GetProperty("fullName").GetString());
+        Assert.Equal("Nguyễn Đức", firstUser.GetProperty("displayName").GetString());
+
+        var token = firstBody.GetProperty("accessToken").GetString()!;
+        using var update = await Put("/api/me/profile", new
+        {
+            displayName = "Duca", phoneNumber = "0912345678", gender = "Nam", dateOfBirth = "1995-05-20"
+        }, token);
+        Assert.Equal(HttpStatusCode.OK, update.StatusCode);
+
+        using var relogin = await Post("/api/auth/google", new { idToken = googleToken });
+        Assert.Equal(HttpStatusCode.OK, relogin.StatusCode);
+        var reloginUser = (await Body(relogin)).GetProperty("user");
+        Assert.Equal("Duca", reloginUser.GetProperty("displayName").GetString());
+        Assert.Equal(googleName, reloginUser.GetProperty("fullName").GetString());
+    }
+
     private async Task AssertCode(HttpStatusCode status, string code, object payload)
     {
         using var response = await Post("/api/auth/register", payload);

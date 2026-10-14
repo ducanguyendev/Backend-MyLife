@@ -324,9 +324,9 @@ public sealed class TestGoogleCredentialVerifier : IGoogleCredentialVerifier
     public Task<GoogleIdentity?> VerifyAsync(GoogleAuthRequest request, CancellationToken cancellationToken = default)
     {
         var parts = request.IdToken?.Split('|');
-        if (parts is not { Length: 4 } || parts[0] != "test") return Task.FromResult<GoogleIdentity?>(null);
+        if (parts is not { Length: 4 or 5 } || parts[0] != "test") return Task.FromResult<GoogleIdentity?>(null);
         return Task.FromResult<GoogleIdentity?>(new(
-            parts[1], parts[2], "Google Test", $"https://lh3.googleusercontent.com/avatar/{parts[3]}", true));
+            parts[1], parts[2], parts.Length == 5 ? parts[4] : "Google Test", $"https://lh3.googleusercontent.com/avatar/{parts[3]}", true));
     }
 }
 

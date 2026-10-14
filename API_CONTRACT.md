@@ -23,6 +23,8 @@ Browser mutations send `credentials: include` and `X-Requested-With: MyLife`; Ja
 | PUT | `/api/me/profile` | Authenticated profile update. |
 | POST | `/api/auth/change-password` | Local-provider accounts only. |
 
+Account identity fields are distinct: `fullName` is the original/account name captured from local registration or the initial verified Google profile; `displayName` is the user-editable UI name. New accounts derive `displayName` by normalizing whitespace and combining the first and last words of `fullName` (for example, `Nguyễn Huỳnh Minh Đức` becomes `Nguyễn Đức`). Google relogin does not overwrite either stored name. The additive `users.display_name` migration backfills from the previously visible `full_name` value to preserve existing custom names; only when `full_name` is blank does it fall back to the email local-part. The profile update accepts `displayName`; legacy request field `fullName` remains a temporary alias that updates only `displayName`, never the stored `fullName`. `/api/me` and auth responses return both `fullName` and `displayName`; the legacy `name` response alias now means `displayName`.
+
 Register errors use machine-readable codes with unchanged semantic HTTP statuses:
 `AUTH_PASSWORD_MISMATCH`, `AUTH_PASSWORD_TOO_LONG`, `AUTH_GMAIL_REQUIRED`,
 `AUTH_EMAIL_ALREADY_REGISTERED` (409), `AUTH_DOB_INVALID`, and
