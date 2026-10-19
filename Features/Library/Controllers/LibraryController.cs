@@ -38,6 +38,9 @@ public sealed class LibraryController(ILibraryService service, ICurrentUserServi
     [HttpGet("albums")]
     public Task<IActionResult> List() => Run(async (userId, ct) => Ok(await service.ListAlbumsAsync(userId, ct)));
 
+    [HttpGet("overview")]
+    public Task<IActionResult> Overview() => Run(async (userId, ct) => Ok(await service.GetOverviewAsync(userId, ct)));
+
     [HttpGet("albums/{albumId:long}")]
     public Task<IActionResult> Get(long albumId) => Run(async (userId, ct) => Ok(await service.GetAlbumAsync(userId, albumId, ct)));
 

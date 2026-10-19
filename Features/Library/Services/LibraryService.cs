@@ -9,6 +9,9 @@ namespace MyLife.Features.Library.Services;
 public sealed partial class LibraryService(AppDbContext db, ILibraryStorageService storage,
     ILibraryPhotoImageCache imageCache, ILogger<LibraryService> logger) : ILibraryService
 {
+    // Internal fallback retained only because the legacy photo column is non-null.
+    private const string AlbumOnlyCategory = "__album__";
+
     public async Task<AlbumDto> CreateAlbumAsync(int userId, CreateAlbumDto dto, CancellationToken ct)
     {
         ValidateMetadata(dto.Name, dto.Description);
@@ -43,6 +46,31 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
 
     public async Task<IReadOnlyList<AlbumDto>> ListAlbumsAsync(int userId, CancellationToken ct) =>
         await SummaryQuery(userId).ToListAsync(ct);
+
+    public async Task<LibraryOverviewDto> GetOverviewAsync(int userId, CancellationToken ct)
+    {
+        var categories = await ListCategoriesAsync(userId, ct);
+        var albums = await db.LibraryAlbums.AsNoTracking()
+            .Where(a => a.CreatedByUserId == userId)
+            .OrderByDescending(a => a.UpdatedAt).ThenByDescending(a => a.Id)
+            .Select(a => new AlbumDetailDto(
+                a.Id,
+                a.Name,
+                a.Description,
+                a.Photos.Count,
+                a.CoverPhoto == null ? null : a.CoverPhoto.Url,
+                a.CoverPhotoId,
+                a.CreatedAt,
+                a.UpdatedAt,
+                a.Photos.OrderBy(p => p.SortOrder).ThenBy(p => p.CreatedAt).ThenBy(p => p.Id)
+                    .Select(p => new PhotoDto(p.Id, p.Url, p.FileName, p.ContentType, p.FileSize,
+                        p.Caption, p.SortOrder, p.TakenAt, p.CreatedAt, p.Title, p.Category,
+                        p.DisplayDate, p.Author, p.DriveFileId))
+                    .ToList()))
+            .ToListAsync(ct);
+
+        return new LibraryOverviewDto(categories, albums);
+    }
 
     public async Task<AlbumDetailDto> GetAlbumAsync(int userId, long albumId, CancellationToken ct)
     {
@@ -85,8 +113,13 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
             throw new LibraryOperationException(400, "Upload between 1 and 20 photos per request.", code: "LIBRARY_FILE_COUNT_INVALID");
         foreach (var file in files) LibraryUploadRules.ValidateFile(file);
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
-        await LockCategoryRegistryAsync(userId, ct);
-        await ValidateCategoryAsync(userId, metadata.Category, ct);
+        var category = AlbumOnlyCategory;
+        if (HasCategory(metadata.Category))
+        {
+            await LockCategoryRegistryAsync(userId, ct);
+            await ValidateCategoryAsync(userId, metadata.Category!, ct);
+            category = metadata.Category!;
+        }
         var album = await LockAlbumAsync(userId, albumId, ct);
         var folderId = RequireFolder(album);
         var uploadedIds = new HashSet<string>(StringComparer.Ordinal);
@@ -110,6 +143,7 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
                     Url = $"https://lh3.googleusercontent.com/d/{result.FileId}", FileName = file.FileName,
                     ContentType = mime, FileSize = content.LongLength, SortOrder = 0, CreatedAt = DateTime.UtcNow };
                 ApplyMetadata(photo, metadata);
+                photo.Category = category;
                 photos.Add(photo);
             }
             db.LibraryPhotos.AddRange(photos);
@@ -156,11 +190,15 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
         var albumId = await db.LibraryPhotos.AsNoTracking().Where(p => p.Id == photoId && p.Album.CreatedByUserId == userId)
             .Select(p => (long?)p.AlbumId).SingleOrDefaultAsync(ct) ?? throw NotFound();
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
-        await LockCategoryRegistryAsync(userId, ct);
-        await ValidateCategoryAsync(userId, metadata.Category, ct);
+        if (HasCategory(metadata.Category))
+        {
+            await LockCategoryRegistryAsync(userId, ct);
+            await ValidateCategoryAsync(userId, metadata.Category!, ct);
+        }
         var album = await LockAlbumAsync(userId, albumId, ct);
         var photo = await db.LibraryPhotos.SingleOrDefaultAsync(p => p.Id == photoId && p.AlbumId == albumId, ct) ?? throw NotFound();
         ApplyMetadata(photo, metadata);
+        if (HasCategory(metadata.Category)) photo.Category = metadata.Category!;
         album.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
@@ -206,19 +244,19 @@ public sealed partial class LibraryService(AppDbContext db, ILibraryStorageServi
     {
         if (!LibraryDisplayDateRules.IsValid(metadata.DisplayDate))
             throw new LibraryOperationException(400, "Display date must be a valid past or current DD/MM/YYYY date.", code: "LIBRARY_INVALID_DISPLAY_DATE");
-        if (string.IsNullOrWhiteSpace(metadata.Category) || metadata.Category.Length > 64 || metadata.Category == "all" ||
+        if (metadata.Category?.Length > 64 || string.Equals(metadata.Category, "all", StringComparison.OrdinalIgnoreCase) ||
             metadata.Title?.Length > 200 || metadata.DisplayDate?.Length > 100 ||
             metadata.Description?.Length > 2000 || metadata.Author?.Length > 200)
-            throw new LibraryOperationException(400, "Invalid Library photo metadata or category.", code: "LIBRARY_METADATA_INVALID");
+            throw new LibraryOperationException(400, "Invalid Library photo metadata.", code: "LIBRARY_METADATA_INVALID");
     }
     private static void ApplyMetadata(LibraryPhoto photo, LibraryPhotoMetadataDto metadata)
     {
         photo.Title = NormalizeDescription(metadata.Title);
-        photo.Category = metadata.Category;
         photo.DisplayDate = NormalizeDescription(metadata.DisplayDate);
         photo.Caption = NormalizeDescription(metadata.Description);
         photo.Author = NormalizeDescription(metadata.Author);
     }
+    private static bool HasCategory(string? category) => !string.IsNullOrWhiteSpace(category);
     private static LibraryOperationException NotFound() => new(404, "Library album or photo not found.");
     private static string RequireFolder(LibraryAlbum album) => !string.IsNullOrWhiteSpace(album.DriveFolderId)
         ? album.DriveFolderId : throw new LibraryOperationException(503, "The album Drive folder is unavailable.", code: "LIBRARY_ALBUM_UNAVAILABLE");

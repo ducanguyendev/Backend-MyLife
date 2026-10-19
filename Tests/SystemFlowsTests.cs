@@ -279,6 +279,7 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
             (HttpMethod.Get, "/api/library/categories"), (HttpMethod.Post, "/api/library/categories"),
             (HttpMethod.Put, "/api/library/categories/1"), (HttpMethod.Delete, "/api/library/categories/1"),
             (HttpMethod.Get, "/api/library/albums"), (HttpMethod.Post, "/api/library/albums"),
+            (HttpMethod.Get, "/api/library/overview"),
             (HttpMethod.Get, "/api/library/albums/1"), (HttpMethod.Put, "/api/library/albums/1"),
             (HttpMethod.Delete, "/api/library/albums/1"), (HttpMethod.Post, "/api/library/albums/1/photos"),
             (HttpMethod.Put, "/api/library/photos/1"), (HttpMethod.Delete, "/api/library/photos/1")

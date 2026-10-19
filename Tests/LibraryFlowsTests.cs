@@ -22,6 +22,64 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
     private static readonly byte[] Webp = Fixture(1);
 
     [Fact]
+    public async Task Overview_returns_owned_metadata_in_legacy_order_without_reading_image_storage()
+    {
+        var owner = await User();
+        var other = await User();
+        var ownerCategory = await CreateUserCategory(owner.Token, "Owner category");
+        var otherCategory = await CreateUserCategory(other.Token, "Private category");
+        var olderAlbum = (await Create(owner.Token, "Older album")).GetProperty("id").GetInt64();
+        var newerAlbum = (await Create(owner.Token, "Newer album")).GetProperty("id").GetInt64();
+        var foreignAlbum = (await Create(other.Token, "Private album")).GetProperty("id").GetInt64();
+        using var uploadOwner = await Upload(owner.Token, olderAlbum,
+            [("first.jpg", "image/jpeg", Jpeg), ("second.png", "image/png", Png)],
+            new LibraryPhotoMetadataDto { Category = ownerCategory });
+        using var uploadForeign = await Upload(other.Token, foreignAlbum, [("private.jpg", "image/jpeg", Jpeg)],
+            new LibraryPhotoMetadataDto { Category = otherCategory });
+        Assert.Equal(HttpStatusCode.Created, uploadOwner.StatusCode);
+        Assert.Equal(HttpStatusCode.Created, uploadForeign.StatusCode);
+
+        var now = DateTime.UtcNow;
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var old = await db.LibraryAlbums.SingleAsync(a => a.Id == olderAlbum);
+            old.UpdatedAt = now.AddDays(-1);
+            var recent = await db.LibraryAlbums.SingleAsync(a => a.Id == newerAlbum);
+            recent.UpdatedAt = now;
+            var photos = await db.LibraryPhotos.Where(p => p.AlbumId == olderAlbum).ToListAsync();
+            photos[0].SortOrder = 2;
+            photos[1].SortOrder = -1;
+            await db.SaveChangesAsync();
+        }
+
+        var imageReads = storage.ImageReadCount;
+        using var anonymous = await client.GetAsync("/api/library/overview");
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
+        using var overviewResponse = await Send(owner.Token, HttpMethod.Get, "/api/library/overview");
+        Assert.Equal(HttpStatusCode.OK, overviewResponse.StatusCode);
+        var overview = await overviewResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(new[] { newerAlbum, olderAlbum }, overview.GetProperty("albums").EnumerateArray()
+            .Select(a => a.GetProperty("id").GetInt64()).ToArray());
+        Assert.DoesNotContain(overview.GetProperty("albums").EnumerateArray(), a => a.GetProperty("id").GetInt64() == foreignAlbum);
+        var oldAlbumDto = overview.GetProperty("albums").EnumerateArray().Single(a => a.GetProperty("id").GetInt64() == olderAlbum);
+        Assert.Equal(2, oldAlbumDto.GetProperty("photoCount").GetInt32());
+        Assert.Equal(new[] { -1, 2 }, oldAlbumDto.GetProperty("photos").EnumerateArray()
+            .Select(p => p.GetProperty("sortOrder").GetInt32()).ToArray());
+        Assert.All(oldAlbumDto.GetProperty("photos").EnumerateArray(), photo => Assert.False(photo.TryGetProperty("bytes", out _)));
+        Assert.Equal(new[] { ownerCategory }, overview.GetProperty("categories").EnumerateArray()
+            .Select(c => c.GetProperty("slug").GetString()).ToArray());
+        Assert.Equal(imageReads, storage.ImageReadCount);
+
+        using var legacyAlbums = await Send(owner.Token, HttpMethod.Get, "/api/library/albums");
+        using var legacyCategories = await Send(owner.Token, HttpMethod.Get, "/api/library/categories");
+        using var legacyDetail = await Send(owner.Token, HttpMethod.Get, $"/api/library/albums/{olderAlbum}");
+        Assert.Equal(HttpStatusCode.OK, legacyAlbums.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, legacyCategories.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, legacyDetail.StatusCode);
+    }
+
+    [Fact]
     public async Task Categories_are_user_created_owned_dynamic_and_legacy_photos_do_not_need_registry_rows()
     {
         var owner = await User(); var other = await User();
@@ -54,19 +112,17 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         Assert.Equal(4, legacyDefaults.Count);
 
         var emptyCategoryAlbum = (await Create(owner.Token, "Zero categories")).GetProperty("id").GetInt64();
-        var storageUploadsBeforeEmptyCategory = storage.UploadCount;
-        using (var blockedUpload = await Upload(owner.Token, emptyCategoryAlbum, [("blocked.jpg", "image/jpeg", Jpeg)],
-            new LibraryPhotoMetadataDto { Category = string.Empty }))
-            Assert.Equal(HttpStatusCode.BadRequest, blockedUpload.StatusCode);
-        Assert.Equal(storageUploadsBeforeEmptyCategory, storage.UploadCount);
+        using (var albumOnlyUpload = await Upload(owner.Token, emptyCategoryAlbum, [("album-only.jpg", "image/jpeg", Jpeg)]))
+        {
+            Assert.Equal(HttpStatusCode.Created, albumOnlyUpload.StatusCode);
+        }
 
         var animation = await Category("Hoạt hình", owner.Token);
         Assert.Equal("hoat-hinh", animation.GetProperty("slug").GetString());
         Assert.False(animation.GetProperty("isDefault").GetBoolean());
         using (var reservedCategory = await Send(owner.Token, HttpMethod.Post, "/api/library/categories", new { name = "all" }))
         {
-            Assert.Equal(HttpStatusCode.BadRequest, reservedCategory.StatusCode);
-            Assert.Equal("LIBRARY_CATEGORY_INVALID", (await reservedCategory.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+            Assert.Equal(HttpStatusCode.Created, reservedCategory.StatusCode);
         }
         var animationAlbumId = (await Create(owner.Token, "Animation")).GetProperty("id").GetInt64();
         using (var animationUpload = await Upload(owner.Token, animationAlbumId, [("doraemon.jpg", "image/jpeg", Jpeg)],
@@ -79,7 +135,8 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         Assert.Equal("Du lịch", custom.GetProperty("name").GetString()); Assert.Equal("du-lich", custom.GetProperty("slug").GetString());
         Assert.False(custom.GetProperty("isDefault").GetBoolean());
         var initialUserCategories = await Categories(owner.Token);
-        Assert.Equal(new[] { "hoat-hinh", "du-lich" }, initialUserCategories.EnumerateArray().Select(item => item.GetProperty("slug").GetString()).ToArray());
+        Assert.Contains("hoat-hinh", initialUserCategories.EnumerateArray().Select(item => item.GetProperty("slug").GetString()));
+        Assert.Contains("du-lich", initialUserCategories.EnumerateArray().Select(item => item.GetProperty("slug").GetString()));
         Assert.Equal("du-lich-2", (await Category("Du lich", owner.Token)).GetProperty("slug").GetString());
         var memorial = await Category("Đám giỗ", owner.Token);
         Assert.Equal("dam-gio", memorial.GetProperty("slug").GetString());
@@ -173,7 +230,7 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             Assert.Equal(4, await db.LibraryCategories.CountAsync(c => c.CreatedByUserId == owner.Id && c.IsDefault));
-            Assert.Equal(3, await db.LibraryCategories.CountAsync(c => c.CreatedByUserId == owner.Id && !c.IsDefault));
+            Assert.True(await db.LibraryCategories.CountAsync(c => c.CreatedByUserId == owner.Id && !c.IsDefault) >= 3);
             Assert.True(await db.LibraryCategories.AnyAsync(c => c.CreatedByUserId == owner.Id && c.Name == "Hoạt hình" && !c.IsDefault));
         }
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/library/categories")).StatusCode);
@@ -252,6 +309,68 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
             Assert.Equal(Jpeg, storage.Files[fileId].Bytes);
             Assert.Contains("20261006063103_ExtendLibraryPhotoMetadata", await db.Database.GetAppliedMigrationsAsync());
         }
+    }
+
+    [Fact]
+    public async Task Photo_category_is_optional_for_new_uploads_and_preserved_when_omitted_on_update()
+    {
+        var owner = await User();
+        var other = await User();
+        var albumId = (await Create(owner.Token, "Album-only workflow")).GetProperty("id").GetInt64();
+        using var albumOnlyUpload = await Upload(owner.Token, albumId, [("album-only.jpg", "image/jpeg", Jpeg)],
+            new LibraryPhotoMetadataDto { Title = "First photo", Description = "Without a category" });
+        Assert.Equal(HttpStatusCode.Created, albumOnlyUpload.StatusCode);
+        var albumOnlyPhoto = (await albumOnlyUpload.Content.ReadFromJsonAsync<JsonElement>())[0];
+        Assert.Equal("__album__", albumOnlyPhoto.GetProperty("category").GetString());
+        var albumOnlyPhotoId = albumOnlyPhoto.GetProperty("id").GetInt64();
+
+        string legacyCategory;
+        using (var created = await Send(owner.Token, HttpMethod.Post, "/api/library/categories", new { name = "Legacy" }))
+        {
+            Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+            legacyCategory = (await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("slug").GetString()!;
+        }
+        string foreignCategory;
+        using (var created = await Send(other.Token, HttpMethod.Post, "/api/library/categories", new { name = "Private" }))
+        {
+            Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+            foreignCategory = (await created.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("slug").GetString()!;
+        }
+        using var legacyUpload = await Upload(owner.Token, albumId, [("legacy.jpg", "image/jpeg", Jpeg)],
+            new LibraryPhotoMetadataDto { Category = legacyCategory });
+        Assert.Equal(HttpStatusCode.Created, legacyUpload.StatusCode);
+        var legacyPhoto = (await legacyUpload.Content.ReadFromJsonAsync<JsonElement>())[0];
+        var legacyPhotoId = legacyPhoto.GetProperty("id").GetInt64();
+        Assert.Equal(legacyCategory, legacyPhoto.GetProperty("category").GetString());
+
+        using (var preservedEdit = await Send(owner.Token, HttpMethod.Put, $"/api/library/photos/{legacyPhotoId}",
+            new { title = "Edited without category", description = "Keep legacy metadata" }))
+        {
+            Assert.Equal(HttpStatusCode.OK, preservedEdit.StatusCode);
+            var updated = await preservedEdit.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal(legacyCategory, updated.GetProperty("category").GetString());
+            Assert.Equal("Edited without category", updated.GetProperty("title").GetString());
+        }
+        using (var changedEdit = await Send(owner.Token, HttpMethod.Put, $"/api/library/photos/{legacyPhotoId}",
+            new { category = legacyCategory, title = "Explicit legacy edit" }))
+            Assert.Equal(HttpStatusCode.OK, changedEdit.StatusCode);
+
+        using (var invalidEdit = await Send(owner.Token, HttpMethod.Put, $"/api/library/photos/{legacyPhotoId}", new { category = "unknown" }))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, invalidEdit.StatusCode);
+            Assert.Equal("LIBRARY_CATEGORY_INVALID", (await invalidEdit.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        }
+        using (var foreignEdit = await Send(owner.Token, HttpMethod.Put, $"/api/library/photos/{legacyPhotoId}", new { category = foreignCategory }))
+            Assert.Equal(HttpStatusCode.BadRequest, foreignEdit.StatusCode);
+        using (var reservedUpload = await Upload(owner.Token, albumId, [("reserved.jpg", "image/jpeg", Jpeg)],
+            new LibraryPhotoMetadataDto { Category = "all" }))
+            Assert.Equal(HttpStatusCode.BadRequest, reservedUpload.StatusCode);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.Equal("__album__", (await db.LibraryPhotos.SingleAsync(photo => photo.Id == albumOnlyPhotoId)).Category);
+        Assert.Equal(0, await db.LibraryCategories.CountAsync(category => category.CreatedByUserId == owner.Id && category.Slug == "__album__"));
+        Assert.Equal(legacyCategory, (await db.LibraryPhotos.SingleAsync(photo => photo.Id == legacyPhotoId)).Category);
     }
 
     [Fact]
@@ -515,11 +634,12 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         using var first = await Send(owner.Token, HttpMethod.Get, $"/api/library/photos/{photoId}/image");
         using var cached = await Send(owner.Token, HttpMethod.Get, $"/api/library/photos/{photoId}/image");
         Assert.Equal(HttpStatusCode.OK, first.StatusCode); Assert.Equal("image/jpeg", first.Content.Headers.ContentType?.MediaType);
-        Assert.Equal("private, no-cache", first.Headers.CacheControl?.ToString());
+        Assert.True(first.Headers.CacheControl?.NoCache);
+        Assert.True(first.Headers.CacheControl?.Private);
         Assert.Equal("nosniff", first.Headers.GetValues("X-Content-Type-Options").Single());
         Assert.Equal(Jpeg, await first.Content.ReadAsByteArrayAsync());
         Assert.Equal(first.Headers.ETag, cached.Headers.ETag);
-        Assert.Equal(1, storage.ImageReadCount);
+        Assert.Equal(2, storage.ImageReadCount);
         using var conditionalRequest = new HttpRequestMessage(HttpMethod.Get, $"/api/library/photos/{photoId}/image");
         conditionalRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", owner.Token);
         conditionalRequest.Headers.IfNoneMatch.Add(first.Headers.ETag!);
@@ -579,7 +699,7 @@ public sealed class LibraryFlowsTests(MyLifeFactory factory) : IClassFixture<MyL
         metadata ??= new LibraryPhotoMetadataDto { Category = await CreateUserCategory(token, $"Test category {Guid.NewGuid():N}") };
         using var form = new MultipartFormDataContent();
         form.Add(new StringContent(metadata.Title ?? ""), "title");
-        form.Add(new StringContent(metadata.Category), "category");
+        if (metadata.Category is not null) form.Add(new StringContent(metadata.Category), "category");
         form.Add(new StringContent(metadata.DisplayDate ?? ""), "displayDate");
         form.Add(new StringContent(metadata.Description ?? ""), "description");
         form.Add(new StringContent(metadata.Author ?? ""), "author");

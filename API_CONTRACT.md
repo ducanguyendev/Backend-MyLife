@@ -56,6 +56,7 @@ An inaccessible album/photo returns 404, and list includes only the caller's alb
 | --- | --- | --- |
 | POST | `/api/library/albums` | JSON `{ "name": "Gia đình 2026", "description": "..." }`; 201 `AlbumDto`, Location points to detail. |
 | GET | `/api/library/albums` | 200 `AlbumDto[]`, updatedAt descending, id descending tie-break. |
+| GET | `/api/library/overview` | 200 `LibraryOverviewDto`; USER-only and current-user isolated. Includes the caller's categories and ordered album summaries with ordered photo metadata. Contains no image bytes and makes no Google Drive calls. Added for the Library's initial metadata load; existing category, album-list, and album-detail routes remain available. |
 | GET | `/api/library/albums/{albumId}` | 200 `AlbumDetailDto`, with photos ordered sortOrder, createdAt, id ascending. |
 | GET | `/api/library/photos/{photoId}/image` | Streams validated image bytes for an owned photo; foreign/missing photo is 404, rejected/unavailable upstream is 502. Private revalidated ETag; no Drive redirect. |
 | PUT | `/api/library/albums/{albumId}` | Same JSON as create; 200 `AlbumDto`; does not rename Drive folder. |
@@ -91,14 +92,16 @@ fields clear to null):
   "description": "Ảnh họp mặt gia đình", "author": "Gia đình" }
 ```
 
-Category is a slug (max 64) from the caller's registry. Four defaults are
-`photos`, `decrees`, `events`, `temple`; omitted category defaults to `photos`.
-Upload and edit ensure defaults and validate ownership before assigning a slug;
-`all` is a frontend-only filter and is rejected. Title/author max 200,
+Category is optional metadata. If a non-empty category is supplied, it must be
+a slug (max 64) from the caller's custom category registry; legacy category
+endpoints and existing category records remain supported. An upload without a
+category receives the internal non-null value `__album__` for the legacy photo
+column; no category row is created. An update without category preserves the
+photo's current value. If category is explicitly supplied, the server validates
+ownership before assigning it; `all` is rejected. Title/author max 200,
 displayDate max 100, description max 2000; blank strings normalize to null.
 DisplayDate is free-form display text and does not change `takenAt`.
-Existing photos receive category `photos` from the metadata migration;
-the UI displays original filename when title is absent.
+Existing photos retain their category; the UI displays original filename when title is absent.
 
 Name is required, trimmed and max 150 characters; description max 2000, blank
 normalizes to null. Photos support JPEG/PNG/WebP/GIF, normalize image/jpg to
