@@ -80,7 +80,8 @@ builder.Services.Configure<GeocodingOptions>(builder.Configuration.GetSection("G
 builder.Services.AddHttpClient<IGeocodingService, NominatimGeocodingService>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(8);
-    client.DefaultRequestHeaders.UserAgent.ParseAdd(builder.Configuration["Geocoding:UserAgent"] ?? "MyLife/1.0");
+    client.DefaultRequestHeaders.UserAgent.ParseAdd(builder.Configuration["Geocoding:UserAgent"] ?? "MyLife/1.0 (family-tree-project)");
+    client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("vi");
 });
 builder.Services.AddSingleton<FamilyLocationGeocodingQueue>();
 builder.Services.AddSingleton<IFamilyLocationGeocodingQueue>(provider => provider.GetRequiredService<FamilyLocationGeocodingQueue>());

@@ -26,10 +26,11 @@ public sealed class FamilyLocationGeocodingQueue : BackgroundService, IFamilyLoc
 
     public void Enqueue(long treeId, int memberId, string address)
     {
-        if (!settings.Enabled || string.IsNullOrWhiteSpace(address)) return;
+        var normalizedAddress = FamilyAddressNormalizer.Normalize(address);
+        if (!settings.Enabled || normalizedAddress is null) return;
         lock (sync)
         {
-            if (queued.Add(memberId) && !channel.Writer.TryWrite(new WorkItem(treeId, memberId, address.Trim()))) queued.Remove(memberId);
+            if (queued.Add(memberId) && !channel.Writer.TryWrite(new WorkItem(treeId, memberId, normalizedAddress))) queued.Remove(memberId);
         }
     }
 
@@ -49,7 +50,7 @@ public sealed class FamilyLocationGeocodingQueue : BackgroundService, IFamilyLoc
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var member = await db.FamilyMembers.SingleOrDefaultAsync(x => x.Id == item.MemberId && x.FamilyTreeId == item.TreeId, ct);
-        if (member is null || !string.Equals(member.Address?.Trim(), item.Address, StringComparison.Ordinal) || IsFreshCache(member, settings.FailureCacheDays)) return;
+        if (member is null || !string.Equals(FamilyAddressNormalizer.Normalize(member.Address), item.Address, StringComparison.OrdinalIgnoreCase) || IsFreshCache(member, settings.FailureCacheDays)) return;
 
         var elapsed = lastRequestAt == DateTimeOffset.MinValue ? int.MaxValue : (int)Math.Min(int.MaxValue, (DateTimeOffset.UtcNow - lastRequestAt).TotalMilliseconds);
         var remaining = lastRequestAt == DateTimeOffset.MinValue ? 0 : Math.Max(15000, settings.MinIntervalMilliseconds) - elapsed;
@@ -60,7 +61,7 @@ public sealed class FamilyLocationGeocodingQueue : BackgroundService, IFamilyLoc
 
         // The address may have changed while the upstream request was in flight.
         var currentAddress = await db.FamilyMembers.Where(x => x.Id == item.MemberId && x.FamilyTreeId == item.TreeId).Select(x => x.Address).SingleOrDefaultAsync(ct);
-        if (!string.Equals(currentAddress?.Trim(), item.Address, StringComparison.Ordinal)) return;
+        if (!string.Equals(FamilyAddressNormalizer.Normalize(currentAddress), item.Address, StringComparison.OrdinalIgnoreCase)) return;
         member.GeocodedAddress = item.Address;
         member.GeocodedAt = DateTime.UtcNow;
         if (result is { } location && double.IsFinite(location.Latitude) && location.Latitude is >= -90 and <= 90 &&
@@ -78,11 +79,11 @@ public sealed class FamilyLocationGeocodingQueue : BackgroundService, IFamilyLoc
     }
 
     private static bool IsFreshCache(MyLife.Shared.Entities.FamilyMember member, int failureCacheDays) =>
-        string.Equals(member.Address?.Trim(), member.GeocodedAddress, StringComparison.Ordinal) &&
+        string.Equals(FamilyAddressNormalizer.Normalize(member.Address), FamilyAddressNormalizer.Normalize(member.GeocodedAddress), StringComparison.OrdinalIgnoreCase) &&
         member.Latitude is double latitude && double.IsFinite(latitude) && latitude is >= -90 and <= 90 &&
         member.Longitude is double longitude && double.IsFinite(longitude) && longitude is >= -180 and <= 180 &&
         !string.IsNullOrWhiteSpace(member.LocationDisplayName) ||
-        string.Equals(member.Address?.Trim(), member.GeocodedAddress, StringComparison.Ordinal) &&
+        string.Equals(FamilyAddressNormalizer.Normalize(member.Address), FamilyAddressNormalizer.Normalize(member.GeocodedAddress), StringComparison.OrdinalIgnoreCase) &&
         member.Latitude is null && member.Longitude is null && member.GeocodedAt is DateTime failedAt &&
         failedAt > DateTime.UtcNow.AddDays(-failureCacheDays);
 }
@@ -101,13 +102,13 @@ public sealed class FamilyMapService(AppDbContext db, IFamilyLocationGeocodingQu
 
         var canGeocode = settings.Value.Enabled && string.Equals(settings.Value.Provider, "Nominatim", StringComparison.OrdinalIgnoreCase);
         var needsGeocoding = members.Where(x => canGeocode && !string.IsNullOrWhiteSpace(x.Address) &&
-            (!string.Equals(x.Address.Trim(), x.GeocodedAddress, StringComparison.Ordinal) ||
+            (!string.Equals(FamilyAddressNormalizer.Normalize(x.Address), FamilyAddressNormalizer.Normalize(x.GeocodedAddress), StringComparison.OrdinalIgnoreCase) ||
              (x.Latitude is null && x.Longitude is null && (x.GeocodedAt is null || x.GeocodedAt <= DateTime.UtcNow.AddDays(-Math.Max(1, settings.Value.FailureCacheDays)))))).ToList();
         var limit = Math.Clamp(settings.Value.MaxQueuePerRequest, 0, 5);
         foreach (var member in needsGeocoding.Take(limit))
-            queue.Enqueue(treeId.Value, member.Id, member.Address!.Trim());
+            queue.Enqueue(treeId.Value, member.Id, member.Address!);
 
-        var located = members.Where(x => string.Equals(x.Address?.Trim(), x.GeocodedAddress, StringComparison.Ordinal) &&
+        var located = members.Where(x => string.Equals(FamilyAddressNormalizer.Normalize(x.Address), FamilyAddressNormalizer.Normalize(x.GeocodedAddress), StringComparison.OrdinalIgnoreCase) &&
             x.Latitude is double lat && double.IsFinite(lat) && lat is >= -90 and <= 90 &&
             x.Longitude is double lon && double.IsFinite(lon) && lon is >= -180 and <= 180 &&
             !string.IsNullOrWhiteSpace(x.LocationDisplayName)).ToList();

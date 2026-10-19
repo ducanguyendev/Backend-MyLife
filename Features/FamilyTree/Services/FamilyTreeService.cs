@@ -49,7 +49,7 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
         await using var transaction = await context.Database.BeginTransactionAsync(System.Data.IsolationLevel.Serializable, ct);
         await ValidateReferencesAsync(tree.Id, null, dto.FatherId, dto.MotherId, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, dto.Gender, ct);
         var member = new FamilyMember { FamilyTreeId = tree.Id, FullName = dto.FullName.Trim(), Generation = dto.Generation, Gender = dto.Gender, DateOfBirth = dto.DateOfBirth, LifeStatus = lifeStatus, DeathDate = deathDate, Role = dto.Role,
-            Address = dto.Address, PhoneNumber = dto.PhoneNumber, FacebookUrl = dto.FacebookUrl, InstagramUrl = dto.InstagramUrl, Biography = dto.Biography,
+            Address = FamilyAddressNormalizer.Normalize(dto.Address), PhoneNumber = dto.PhoneNumber, FacebookUrl = dto.FacebookUrl, InstagramUrl = dto.InstagramUrl, Biography = dto.Biography,
             FatherId = dto.FatherId, MotherId = dto.MotherId, CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow };
         context.FamilyMembers.Add(member); await context.SaveChangesAsync(ct);
         await SynchronizeRelationsAsync(member, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, ct);
@@ -65,13 +65,13 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
         var member = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == id && x.FamilyTreeId == tree.Id, ct) ?? throw new KeyNotFoundException();
         await ValidateReferencesAsync(tree.Id, id, dto.FatherId, dto.MotherId, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, dto.Gender, ct);
         member.FullName = dto.FullName.Trim(); member.Generation = dto.Generation; member.Gender = dto.Gender; member.DateOfBirth = dto.DateOfBirth; member.LifeStatus = lifeStatus; member.DeathDate = deathDate; member.Role = dto.Role;
-        var nextAddress = dto.Address?.Trim();
-        if (!string.Equals(member.Address?.Trim(), nextAddress, StringComparison.Ordinal))
+        var nextAddress = FamilyAddressNormalizer.Normalize(dto.Address);
+        if (!string.Equals(FamilyAddressNormalizer.Normalize(member.Address), nextAddress, StringComparison.OrdinalIgnoreCase))
         {
             member.Latitude = null; member.Longitude = null; member.GeocodedAddress = null;
             member.LocationDisplayName = null; member.GeocodedAt = null;
         }
-        member.Address = dto.Address; member.PhoneNumber = dto.PhoneNumber; member.FacebookUrl = dto.FacebookUrl; member.InstagramUrl = dto.InstagramUrl; member.Biography = dto.Biography;
+        member.Address = nextAddress; member.PhoneNumber = dto.PhoneNumber; member.FacebookUrl = dto.FacebookUrl; member.InstagramUrl = dto.InstagramUrl; member.Biography = dto.Biography;
         member.FatherId = dto.FatherId; member.MotherId = dto.MotherId; member.UpdatedAt = DateTime.UtcNow;
         await SynchronizeRelationsAsync(member, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, ct);
         await context.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
