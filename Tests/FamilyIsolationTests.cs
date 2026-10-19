@@ -67,8 +67,8 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
             var result = (await Body(mapA)).GetProperty("data");
             Assert.Equal(1, result.GetProperty("totalMembers").GetInt32());
             Assert.Equal("Ho Chi Minh City, Vietnam", result.GetProperty("locations")[0].GetProperty("displayName").GetString());
-            Assert.Equal(10.8, result.GetProperty("locations")[0].GetProperty("latitude").GetDouble());
-            Assert.Equal(106.7, result.GetProperty("locations")[0].GetProperty("longitude").GetDouble());
+            Assert.Equal(10.77, result.GetProperty("locations")[0].GetProperty("latitude").GetDouble());
+            Assert.Equal(106.69, result.GetProperty("locations")[0].GetProperty("longitude").GetDouble());
             Assert.Equal(aMember, result.GetProperty("locations")[0].GetProperty("members")[0].GetProperty("id").GetInt32());
         }
         using (var mapB = await Send(b.Token, HttpMethod.Get, "/api/family-tree/map"))
@@ -92,7 +92,10 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         using (var noAddressMap = await Send(withoutAddress.Token, HttpMethod.Get, "/api/family-tree/map"))
         {
             Assert.Equal(HttpStatusCode.OK, noAddressMap.StatusCode);
-            Assert.Equal(0, (await Body(noAddressMap)).GetProperty("data").GetProperty("pendingGeocodingMembers").GetInt32());
+            var noAddressData = (await Body(noAddressMap)).GetProperty("data");
+            Assert.Equal(0, noAddressData.GetProperty("pendingGeocodingMembers").GetInt32());
+            Assert.Equal(1, noAddressData.GetProperty("noAddressMembers").GetInt32());
+            Assert.Equal(0, noAddressData.GetProperty("failedGeocodingMembers").GetInt32());
         }
         Assert.Equal(initialGeocoderCalls, geocoder.Calls);
     }
@@ -116,6 +119,7 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
             var result = (await Body(cached)).GetProperty("data");
             Assert.Equal(1, result.GetProperty("locatedMembers").GetInt32());
             Assert.Equal(0, result.GetProperty("pendingGeocodingMembers").GetInt32());
+            Assert.Equal(0, result.GetProperty("failedGeocodingMembers").GetInt32());
         }
 
         var unresolvedId = await Create(user.Token, "Unresolved", new() { ["address"] = "unresolved address" });
@@ -132,6 +136,8 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
             Assert.Equal(2, result.GetProperty("totalMembers").GetInt32());
             Assert.Equal(1, result.GetProperty("locatedMembers").GetInt32());
             Assert.Equal(0, result.GetProperty("pendingGeocodingMembers").GetInt32());
+            Assert.Equal(1, result.GetProperty("failedGeocodingMembers").GetInt32());
+            Assert.Equal(0, result.GetProperty("noAddressMembers").GetInt32());
         }
         Assert.Equal(initialGeocoderCalls + 2, geocoder.Calls);
 
@@ -147,6 +153,42 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
             }
             throw new TimeoutException("Background family map geocoding did not finish.");
         }
+    }
+
+    [Fact]
+    public async Task Family_map_groups_by_precise_coordinates_instead_of_shared_city_name()
+    {
+        var user = await User();
+        var samePlaceA = await Create(user.Token, "Same place A", new() { ["address"] = "Address A" });
+        var differentPlace = await Create(user.Token, "Different place", new() { ["address"] = "Address B" });
+        var samePlaceB = await Create(user.Token, "Same place B", new() { ["address"] = "Address C" });
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            foreach (var (id, latitude, longitude) in new[]
+            {
+                (samePlaceA, 10.1234567, 106.1234567),
+                (differentPlace, 10.2234567, 106.2234567),
+                (samePlaceB, 10.1234567, 106.1234567),
+            })
+            {
+                var member = await db.FamilyMembers.SingleAsync(x => x.Id == id);
+                member.Latitude = latitude;
+                member.Longitude = longitude;
+                member.GeocodedAddress = member.Address;
+                member.LocationDisplayName = "Ho Chi Minh City, Vietnam";
+                member.GeocodedAt = DateTime.UtcNow;
+            }
+            await db.SaveChangesAsync();
+        }
+
+        using var response = await Send(user.Token, HttpMethod.Get, "/api/family-tree/map");
+        var locations = (await Body(response)).GetProperty("data").GetProperty("locations").EnumerateArray().ToArray();
+
+        Assert.Equal(2, locations.Length);
+        Assert.Equal(new[] { 2, 1 }, locations.Select(location => location.GetProperty("memberCount").GetInt32()).OrderDescending());
+        Assert.Contains(locations, location => location.GetProperty("latitude").GetDouble() == 10.1234567 && location.GetProperty("longitude").GetDouble() == 106.1234567);
+        Assert.All(locations, location => Assert.Equal("Ho Chi Minh City, Vietnam", location.GetProperty("displayName").GetString()));
     }
     [Fact]
     public async Task Foreign_parent_spouse_child_and_horizontal_references_are_rejected_on_create_and_update()

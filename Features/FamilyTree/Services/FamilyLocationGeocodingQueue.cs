@@ -50,13 +50,14 @@ public sealed class FamilyLocationGeocodingQueue : BackgroundService, IFamilyLoc
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var member = await db.FamilyMembers.SingleOrDefaultAsync(x => x.Id == item.MemberId && x.FamilyTreeId == item.TreeId, ct);
-        if (member is null || !string.Equals(FamilyAddressNormalizer.Normalize(member.Address), item.Address, StringComparison.OrdinalIgnoreCase) || IsFreshCache(member, settings.FailureCacheDays)) return;
+        if (member is null || !string.Equals(FamilyAddressNormalizer.Normalize(member.Address), item.Address, StringComparison.OrdinalIgnoreCase) || IsFreshCache(member, settings.FailureCacheHours)) return;
 
         var elapsed = lastRequestAt == DateTimeOffset.MinValue ? int.MaxValue : (int)Math.Min(int.MaxValue, (DateTimeOffset.UtcNow - lastRequestAt).TotalMilliseconds);
-        var remaining = lastRequestAt == DateTimeOffset.MinValue ? 0 : Math.Max(15000, settings.MinIntervalMilliseconds) - elapsed;
+        var remaining = lastRequestAt == DateTimeOffset.MinValue ? 0 : settings.EffectiveMinIntervalMilliseconds - elapsed;
         if (remaining > 0) await Task.Delay(remaining, ct);
         lastRequestAt = DateTimeOffset.UtcNow;
         var geocoder = scope.ServiceProvider.GetRequiredService<IGeocodingService>();
+        logger.LogDebug("Family map geocode queued member {MemberId} for normalized address {Address}.", item.MemberId, item.Address);
         var result = await geocoder.GeocodeAsync(item.Address, ct);
 
         // The address may have changed while the upstream request was in flight.
@@ -70,22 +71,19 @@ public sealed class FamilyLocationGeocodingQueue : BackgroundService, IFamilyLoc
             member.Latitude = location.Latitude;
             member.Longitude = location.Longitude;
             member.LocationDisplayName = location.DisplayName.Trim()[..Math.Min(location.DisplayName.Trim().Length, 500)];
+            logger.LogDebug("Family map geocode succeeded for member {MemberId}: {DisplayName}.", item.MemberId, member.LocationDisplayName);
         }
         else
         {
             member.Latitude = null; member.Longitude = null; member.LocationDisplayName = null;
+            logger.LogDebug("Family map geocode failed or found no result for member {MemberId}.", item.MemberId);
         }
         await db.SaveChangesAsync(ct);
     }
 
-    private static bool IsFreshCache(MyLife.Shared.Entities.FamilyMember member, int failureCacheDays) =>
-        string.Equals(FamilyAddressNormalizer.Normalize(member.Address), FamilyAddressNormalizer.Normalize(member.GeocodedAddress), StringComparison.OrdinalIgnoreCase) &&
-        member.Latitude is double latitude && double.IsFinite(latitude) && latitude is >= -90 and <= 90 &&
-        member.Longitude is double longitude && double.IsFinite(longitude) && longitude is >= -180 and <= 180 &&
-        !string.IsNullOrWhiteSpace(member.LocationDisplayName) ||
-        string.Equals(FamilyAddressNormalizer.Normalize(member.Address), FamilyAddressNormalizer.Normalize(member.GeocodedAddress), StringComparison.OrdinalIgnoreCase) &&
-        member.Latitude is null && member.Longitude is null && member.GeocodedAt is DateTime failedAt &&
-        failedAt > DateTime.UtcNow.AddDays(-failureCacheDays);
+    private static bool IsFreshCache(MyLife.Shared.Entities.FamilyMember member, int failureCacheHours) =>
+        FamilyMapMemberStatusResolver.Resolve(member.Address, member.GeocodedAddress, member.GeocodedAt, member.Latitude, member.Longitude,
+            member.LocationDisplayName, true, failureCacheHours, DateTime.UtcNow) is FamilyMapMemberLocationStatus.Located or FamilyMapMemberLocationStatus.Failed;
 }
 
 public sealed class FamilyMapService(AppDbContext db, IFamilyLocationGeocodingQueue queue, IOptions<GeocodingOptions> settings)
@@ -101,28 +99,23 @@ public sealed class FamilyMapService(AppDbContext db, IFamilyLocationGeocodingQu
             .OrderBy(x => x.Generation).ThenBy(x => x.FullName).ToListAsync(ct);
 
         var canGeocode = settings.Value.Enabled && string.Equals(settings.Value.Provider, "Nominatim", StringComparison.OrdinalIgnoreCase);
-        var needsGeocoding = members.Where(x => canGeocode && !string.IsNullOrWhiteSpace(x.Address) &&
-            (!string.Equals(FamilyAddressNormalizer.Normalize(x.Address), FamilyAddressNormalizer.Normalize(x.GeocodedAddress), StringComparison.OrdinalIgnoreCase) ||
-             (x.Latitude is null && x.Longitude is null && (x.GeocodedAt is null || x.GeocodedAt <= DateTime.UtcNow.AddDays(-Math.Max(1, settings.Value.FailureCacheDays)))))).ToList();
+        var now = DateTime.UtcNow;
+        var states = members.Select(member =>
+        {
+            var status = FamilyMapMemberStatusResolver.Resolve(member.Address, member.GeocodedAddress, member.GeocodedAt, member.Latitude, member.Longitude,
+                member.LocationDisplayName, canGeocode, settings.Value.FailureCacheHours, now);
+            return new { Member = member, Status = status };
+        }).ToList();
+        var needsGeocoding = states.Where(x => x.Status == FamilyMapMemberLocationStatus.Pending).ToList();
+        var noAddressCount = states.Count(x => x.Status == FamilyMapMemberLocationStatus.NoAddress);
+        var failedCount = states.Count(x => x.Status == FamilyMapMemberLocationStatus.Failed);
         var limit = Math.Clamp(settings.Value.MaxQueuePerRequest, 0, 5);
-        foreach (var member in needsGeocoding.Take(limit))
-            queue.Enqueue(treeId.Value, member.Id, member.Address!);
+        foreach (var state in needsGeocoding.Take(limit))
+            queue.Enqueue(treeId.Value, state.Member.Id, state.Member.Address!);
 
-        var located = members.Where(x => string.Equals(FamilyAddressNormalizer.Normalize(x.Address), FamilyAddressNormalizer.Normalize(x.GeocodedAddress), StringComparison.OrdinalIgnoreCase) &&
-            x.Latitude is double lat && double.IsFinite(lat) && lat is >= -90 and <= 90 &&
-            x.Longitude is double lon && double.IsFinite(lon) && lon is >= -180 and <= 180 &&
-            !string.IsNullOrWhiteSpace(x.LocationDisplayName)).ToList();
-        var locations = located.GroupBy(x => x.LocationDisplayName!.Trim(), StringComparer.OrdinalIgnoreCase)
-            .Select(group => new Features.FamilyTree.DTOs.FamilyMapLocationDto
-            {
-                Key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(group.Key.ToUpperInvariant())))[..16].ToLowerInvariant(),
-                DisplayName = group.Key,
-                // Round to roughly city scale before the map API exposes coordinates.
-                Latitude = Math.Round(group.Average(x => Math.Round(x.Latitude!.Value, 1, MidpointRounding.AwayFromZero)), 1, MidpointRounding.AwayFromZero),
-                Longitude = Math.Round(group.Average(x => Math.Round(x.Longitude!.Value, 1, MidpointRounding.AwayFromZero)), 1, MidpointRounding.AwayFromZero),
-                MemberCount = group.Count(),
-                Members = group.Select(x => new Features.FamilyTree.DTOs.FamilyMapMemberDto { Id = x.Id, FullName = x.FullName, Generation = x.Generation }).ToList()
-            }).OrderByDescending(x => x.MemberCount).ThenBy(x => x.DisplayName).ToList();
-        return new Features.FamilyTree.DTOs.FamilyMapDto { TotalMembers = members.Count, LocatedMembers = located.Count, UnlocatedMembers = members.Count - located.Count, PendingGeocodingMembers = needsGeocoding.Count, Locations = locations };
+        var located = states.Where(x => x.Status == FamilyMapMemberLocationStatus.Located).ToList();
+        var locations = FamilyMapLocationBuilder.Build(located.Select(x => new FamilyMapLocatedMember(
+            x.Member.Id, x.Member.FullName, x.Member.Generation, x.Member.Latitude!.Value, x.Member.Longitude!.Value, x.Member.LocationDisplayName!)));
+        return new Features.FamilyTree.DTOs.FamilyMapDto { TotalMembers = members.Count, LocatedMembers = located.Count, UnlocatedMembers = members.Count - located.Count, PendingGeocodingMembers = needsGeocoding.Count, NoAddressMembers = noAddressCount, FailedGeocodingMembers = failedCount, Locations = locations };
     }
 }
