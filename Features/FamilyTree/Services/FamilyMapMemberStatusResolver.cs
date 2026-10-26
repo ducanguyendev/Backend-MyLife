@@ -20,14 +20,17 @@ public static class FamilyMapMemberStatusResolver
         string? displayName,
         bool geocodingEnabled,
         int failureCacheHours,
-        DateTime utcNow)
+        DateTime utcNow,
+        string? locationSource = null)
     {
         var normalizedAddress = FamilyAddressNormalizer.Normalize(address);
+        var hasValidCoordinates = latitude is double lat && double.IsFinite(lat) && lat is >= -90 and <= 90 &&
+            longitude is double lon && double.IsFinite(lon) && lon is >= -180 and <= 180 && !string.IsNullOrWhiteSpace(displayName);
+        if (string.Equals(locationSource, "MANUAL", StringComparison.OrdinalIgnoreCase))
+            return hasValidCoordinates ? FamilyMapMemberLocationStatus.Located : FamilyMapMemberLocationStatus.Failed;
         if (normalizedAddress is null) return FamilyMapMemberLocationStatus.NoAddress;
 
         var addressMatches = string.Equals(normalizedAddress, FamilyAddressNormalizer.Normalize(geocodedAddress), StringComparison.OrdinalIgnoreCase);
-        var hasValidCoordinates = latitude is double lat && double.IsFinite(lat) && lat is >= -90 and <= 90 &&
-            longitude is double lon && double.IsFinite(lon) && lon is >= -180 and <= 180 && !string.IsNullOrWhiteSpace(displayName);
         if (addressMatches && hasValidCoordinates) return FamilyMapMemberLocationStatus.Located;
 
         var failureExpiry = utcNow.AddHours(-Math.Clamp(failureCacheHours, 1, 168));

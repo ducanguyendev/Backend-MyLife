@@ -45,6 +45,7 @@ public sealed class FamilyTreeAvatarConditionalRequestTests
         public Task<FamilyMemberDto?> GetMemberByIdAsync(int userId, int memberId, CancellationToken ct) => throw new NotImplementedException();
         public Task<FamilyMemberDto> CreateMemberAsync(int userId, CreateFamilyMemberDto dto, CancellationToken ct) => throw new NotImplementedException();
         public Task<FamilyMemberDto> UpdateMemberAsync(int userId, int memberId, UpdateFamilyMemberDto dto, CancellationToken ct) => throw new NotImplementedException();
+        public Task<FamilyMemberDto> UpdateMemberLocationAsync(int userId, int memberId, UpdateFamilyMemberLocationDto dto, CancellationToken ct) => throw new NotImplementedException();
         public Task<FamilyMemberDto> UploadMemberAvatarAsync(int userId, int memberId, byte[] content, string contentType, CancellationToken ct) => throw new NotImplementedException();
         public Task<FamilyMemberDto> DeleteMemberAvatarAsync(int userId, int memberId, CancellationToken ct) => throw new NotImplementedException();
         public Task<bool> DeleteMemberAsync(int userId, int memberId, CancellationToken ct) => throw new NotImplementedException();

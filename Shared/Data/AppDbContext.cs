@@ -21,6 +21,7 @@ namespace MyLife.Shared.Data
         public DbSet<FamilyMember> FamilyMembers => Set<FamilyMember>();
         public DbSet<FamilyRelationship> FamilyRelationships => Set<FamilyRelationship>();
         public DbSet<FamilyAnniversary> FamilyAnniversaries => Set<FamilyAnniversary>();
+        public DbSet<FamilyTimelineEvent> FamilyTimelineEvents => Set<FamilyTimelineEvent>();
         public DbSet<Generation> Generations => Set<Generation>();
         public DbSet<LibraryAlbum> LibraryAlbums => Set<LibraryAlbum>();
         public DbSet<LibraryPhoto> LibraryPhotos => Set<LibraryPhoto>();
@@ -227,6 +228,34 @@ namespace MyLife.Shared.Data
                 entity.HasIndex(e => e.RelatedMemberId);
                 entity.HasOne(e => e.FamilyTree).WithMany(e => e.Anniversaries).HasForeignKey(e => e.FamilyTreeId).OnDelete(DeleteBehavior.Cascade);
                 entity.HasOne(e => e.RelatedMember).WithMany(e => e.Anniversaries).HasForeignKey(e => e.RelatedMemberId).OnDelete(DeleteBehavior.SetNull);
+            });
+
+            modelBuilder.Entity<FamilyTimelineEvent>(entity =>
+            {
+                entity.ToTable("family_timeline_events");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id").ValueGeneratedOnAdd();
+                entity.Property(e => e.FamilyTreeId).HasColumnName("family_tree_id").IsRequired();
+                entity.Property(e => e.MemberId).HasColumnName("member_id");
+                entity.Property(e => e.EventType).HasColumnName("event_type").HasMaxLength(32).IsRequired();
+                entity.Property(e => e.Title).HasColumnName("title").HasMaxLength(200).IsRequired();
+                entity.Property(e => e.Description).HasColumnName("description").HasMaxLength(2000);
+                entity.Property(e => e.EventDate).HasColumnName("event_date");
+                entity.Property(e => e.EventYear).HasColumnName("event_year");
+                entity.Property(e => e.IsApproximate).HasColumnName("is_approximate").HasDefaultValue(false).IsRequired();
+                entity.Property(e => e.Location).HasColumnName("location").HasMaxLength(500);
+                entity.Property(e => e.Latitude).HasColumnName("latitude").HasColumnType("double precision");
+                entity.Property(e => e.Longitude).HasColumnName("longitude").HasColumnType("double precision");
+                entity.Property(e => e.RelatedMemberId).HasColumnName("related_member_id");
+                entity.Property(e => e.SourceType).HasColumnName("source_type").HasMaxLength(32);
+                entity.Property(e => e.SourceId).HasColumnName("source_id");
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.Property(e => e.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("CURRENT_TIMESTAMP");
+                entity.HasIndex(e => new { e.FamilyTreeId, e.EventDate, e.EventYear });
+                entity.HasIndex(e => new { e.FamilyTreeId, e.MemberId });
+                entity.HasOne(e => e.FamilyTree).WithMany(e => e.TimelineEvents).HasForeignKey(e => e.FamilyTreeId).OnDelete(DeleteBehavior.Cascade);
+                entity.HasOne(e => e.Member).WithMany().HasForeignKey(e => e.MemberId).OnDelete(DeleteBehavior.SetNull);
+                entity.HasOne(e => e.RelatedMember).WithMany().HasForeignKey(e => e.RelatedMemberId).OnDelete(DeleteBehavior.SetNull);
             });
 
             // 6. Table FAMILY_MEMBERS

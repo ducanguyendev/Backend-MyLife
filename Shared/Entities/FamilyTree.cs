@@ -9,4 +9,5 @@ public sealed class FamilyTree
     public DateTime UpdatedAt { get; set; }
     public ICollection<FamilyMember> Members { get; set; } = new List<FamilyMember>();
     public ICollection<FamilyAnniversary> Anniversaries { get; set; } = new List<FamilyAnniversary>();
+    public ICollection<FamilyTimelineEvent> TimelineEvents { get; set; } = new List<FamilyTimelineEvent>();
 }

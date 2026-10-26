@@ -9,6 +9,20 @@ public sealed class FamilyMapDto
     public int NoAddressMembers { get; init; }
     public int FailedGeocodingMembers { get; init; }
     public IReadOnlyList<FamilyMapLocationDto> Locations { get; init; } = [];
+    public IReadOnlyList<FamilyMapMemberLocationDto> Members { get; init; } = [];
+}
+
+public sealed class FamilyMapMemberLocationDto
+{
+    public int Id { get; init; }
+    public string FullName { get; init; } = string.Empty;
+    public int Generation { get; init; }
+    public string? Address { get; init; }
+    public string Status { get; init; } = string.Empty;
+    public double? Latitude { get; init; }
+    public double? Longitude { get; init; }
+    public string? LocationDisplayName { get; init; }
+    public string? LocationSource { get; init; }
 }
 
 public sealed class FamilyMapLocationDto

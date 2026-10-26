@@ -20,6 +20,11 @@ namespace MyLife.Features.FamilyTree.DTOs
         public DateOnly? DeathDate { get; set; }
         public string? Role { get; set; }
         public string? Address { get; set; }
+        public double? Latitude { get; set; }
+        public double? Longitude { get; set; }
+        public string? LocationDisplayName { get; set; }
+        public string? LocationSource { get; set; }
+        public string LocationStatus { get; set; } = "NO_ADDRESS";
         public string? PhoneNumber { get; set; }
         public string? FacebookUrl { get; set; }
         public string? InstagramUrl { get; set; }

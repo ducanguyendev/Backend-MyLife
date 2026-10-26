@@ -11,7 +11,9 @@ namespace MyLife.Features.FamilyTree.Controllers;
 [ApiController]
 [Route("api/family-tree")]
 [Authorize(Roles = AppRoles.User)]
-public sealed class FamilyTreeController(IFamilyTreeService service, ICurrentUserService currentUser, FamilyMapService? mapService = null) : ControllerBase
+public sealed class FamilyTreeController(IFamilyTreeService service, ICurrentUserService currentUser, FamilyMapService? mapService = null,
+    IFamilyRelationshipService? relationshipService = null, IFamilyTimelineService? timelineService = null,
+    IFamilyMemberProfileService? profileService = null) : ControllerBase
 {
     [HttpGet]
     public Task<IActionResult> GetAll() => Run(async (userId, ct) => Ok(new { success = true, data = await service.GetAllMembersAsync(userId, ct) }));
@@ -19,6 +21,34 @@ public sealed class FamilyTreeController(IFamilyTreeService service, ICurrentUse
     public Task<IActionResult> Generations() => Run(async (_, ct) => Ok(new { success = true, data = await service.GetAllGenerationsAsync(ct) }));
     [HttpGet("map")]
     public Task<IActionResult> Map() => Run(async (userId, ct) => Ok(new { success = true, data = await mapService!.GetMapAsync(userId, ct) }));
+    [HttpGet("relationship")]
+    public Task<IActionResult> Relationship([FromQuery] int fromMemberId, [FromQuery] int toMemberId) => Run(async (userId, ct) =>
+    {
+        if (fromMemberId <= 0 || toMemberId <= 0) return BadRequest(Error("Member IDs must be positive.", "FAMILY_RELATIONSHIP_INVALID_MEMBER_ID"));
+        var result = await relationshipService!.FindAsync(userId, fromMemberId, toMemberId, ct);
+        return result is null ? NotFound(Error("One or both members were not found in this family tree.", "FAMILY_RELATIONSHIP_MEMBER_NOT_FOUND")) : Ok(new { success = true, data = result });
+    });
+    [HttpGet("{id:int}/profile")]
+    public Task<IActionResult> Profile(int id) => Run(async (userId, ct) =>
+    {
+        var result = await profileService!.GetAsync(userId, id, ct);
+        return result is null ? NotFound(Error("Family member not found.")) : Ok(new { success = true, data = result });
+    });
+    [HttpGet("timeline")]
+    public Task<IActionResult> Timeline() => Run(async (userId, ct) => Ok(new { success = true, data = await timelineService!.ListAsync(userId, null, ct) }));
+    [HttpGet("{memberId:int}/timeline")]
+    public Task<IActionResult> MemberTimeline(int memberId) => Run(async (userId, ct) => Ok(new { success = true, data = await timelineService!.ListAsync(userId, memberId, ct) }));
+    [HttpPost("timeline")]
+    public Task<IActionResult> CreateTimelineEvent(FamilyTimelineWriteDto dto) => Run(async (userId, ct) => StatusCode(201, new { success = true, data = await timelineService!.CreateAsync(userId, dto, ct) }));
+    [HttpPut("timeline/{id:long}")]
+    public Task<IActionResult> UpdateTimelineEvent(long id, FamilyTimelineWriteDto dto) => Run(async (userId, ct) =>
+    {
+        var item = await timelineService!.UpdateAsync(userId, id, dto, ct);
+        return item is null ? NotFound(Error("Timeline event not found.", "FAMILY_TIMELINE_EVENT_NOT_FOUND")) : Ok(new { success = true, data = item });
+    });
+    [HttpDelete("timeline/{id:long}")]
+    public Task<IActionResult> DeleteTimelineEvent(long id) => Run(async (userId, ct) =>
+        await timelineService!.DeleteAsync(userId, id, ct) ? NoContent() : NotFound(Error("Timeline event not found.", "FAMILY_TIMELINE_EVENT_NOT_FOUND")));
     [HttpGet("{id:int}")]
     public Task<IActionResult> Get(int id) => Run(async (userId, ct) =>
     {
@@ -29,6 +59,9 @@ public sealed class FamilyTreeController(IFamilyTreeService service, ICurrentUse
     public Task<IActionResult> Create(CreateFamilyMemberDto dto) => Run(async (userId, ct) => StatusCode(201, new { success = true, data = await service.CreateMemberAsync(userId, dto, ct) }));
     [HttpPut("{id:int}")]
     public Task<IActionResult> Update(int id, UpdateFamilyMemberDto dto) => Run(async (userId, ct) => Ok(new { success = true, data = await service.UpdateMemberAsync(userId, id, dto, ct) }));
+    [HttpPut("{id:int}/location")]
+    public Task<IActionResult> UpdateLocation(int id, UpdateFamilyMemberLocationDto dto) => Run(async (userId, ct) =>
+        Ok(new { success = true, data = await service.UpdateMemberLocationAsync(userId, id, dto, ct) }));
     [HttpDelete("{id:int}")]
     public Task<IActionResult> Delete(int id) => Run(async (userId, ct) => await service.DeleteMemberAsync(userId, id, ct)
         ? Ok(new { success = true, message = "Family member deleted." }) : NotFound(Error("Family member not found.")));

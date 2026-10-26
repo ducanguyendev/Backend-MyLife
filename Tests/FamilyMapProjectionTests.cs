@@ -24,6 +24,15 @@ public sealed class FamilyMapProjectionTests
     }
 
     [Fact]
+    public void ManualCoordinatesAreLocatedEvenWithoutAnAddressAndDoNotNeedGeocoderFallback()
+    {
+        var status = FamilyMapMemberStatusResolver.Resolve(null, null, DateTime.UtcNow,
+            10.123456, 106.654321, "Confirmed location", true, 24, DateTime.UtcNow, "MANUAL");
+
+        Assert.Equal(FamilyMapMemberLocationStatus.Located, status);
+    }
+
+    [Fact]
     public void GroupsSamePreciseLocationAndKeepsNearbyAddressesWithSameLabelSeparate()
     {
         var locations = FamilyMapLocationBuilder.Build(new[]

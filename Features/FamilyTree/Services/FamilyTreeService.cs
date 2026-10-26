@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using MyLife.Features.FamilyTree.DTOs;
 using MyLife.Shared.Data;
 using MyLife.Shared.Entities;
@@ -6,7 +7,7 @@ using UserFamilyTree = MyLife.Shared.Entities.FamilyTree;
 
 namespace MyLife.Features.FamilyTree.Services;
 
-public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAvatarService avatarStorage, IMemberAvatarImageCache avatarImageCache, ILogger<FamilyTreeService> logger, TimeProvider timeProvider) : IFamilyTreeService
+public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAvatarService avatarStorage, IMemberAvatarImageCache avatarImageCache, ILogger<FamilyTreeService> logger, TimeProvider timeProvider, IFamilyLocationGeocodingQueue geocodingQueue, IOptions<GeocodingOptions> geocodingOptions) : IFamilyTreeService
 {
     public async Task<UserFamilyTree> EnsureUserFamilyTreeAsync(int userId, CancellationToken ct)
     {
@@ -54,6 +55,7 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
         context.FamilyMembers.Add(member); await context.SaveChangesAsync(ct);
         await SynchronizeRelationsAsync(member, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, ct);
         await context.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
+        if (member.Address is not null) geocodingQueue.Enqueue(tree.Id, member.Id, member.Address);
         return (await GetMemberByIdAsync(userId, member.Id, ct))!;
     }
 
@@ -65,17 +67,44 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
         var member = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == id && x.FamilyTreeId == tree.Id, ct) ?? throw new KeyNotFoundException();
         await ValidateReferencesAsync(tree.Id, id, dto.FatherId, dto.MotherId, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, dto.Gender, ct);
         member.FullName = dto.FullName.Trim(); member.Generation = dto.Generation; member.Gender = dto.Gender; member.DateOfBirth = dto.DateOfBirth; member.LifeStatus = lifeStatus; member.DeathDate = deathDate; member.Role = dto.Role;
+        var previousAddress = FamilyAddressNormalizer.Normalize(member.Address);
         var nextAddress = FamilyAddressNormalizer.Normalize(dto.Address);
-        if (!string.Equals(FamilyAddressNormalizer.Normalize(member.Address), nextAddress, StringComparison.OrdinalIgnoreCase))
+        var addressChanged = !string.Equals(previousAddress, nextAddress, StringComparison.OrdinalIgnoreCase);
+        if (addressChanged)
         {
             member.Latitude = null; member.Longitude = null; member.GeocodedAddress = null;
-            member.LocationDisplayName = null; member.GeocodedAt = null;
+            member.LocationDisplayName = null; member.GeocodedAt = null; member.LocationSource = null;
         }
         member.Address = nextAddress; member.PhoneNumber = dto.PhoneNumber; member.FacebookUrl = dto.FacebookUrl; member.InstagramUrl = dto.InstagramUrl; member.Biography = dto.Biography;
         member.FatherId = dto.FatherId; member.MotherId = dto.MotherId; member.UpdatedAt = DateTime.UtcNow;
         await SynchronizeRelationsAsync(member, dto.SpouseId, dto.ChildIds, dto.HorizontalRelations, ct);
         await context.SaveChangesAsync(ct); await transaction.CommitAsync(ct);
+        if (addressChanged && nextAddress is not null) geocodingQueue.Enqueue(tree.Id, member.Id, nextAddress);
         return (await GetMemberByIdAsync(userId, id, ct))!;
+    }
+
+    public async Task<FamilyMemberDto> UpdateMemberLocationAsync(int userId, int memberId, UpdateFamilyMemberLocationDto dto, CancellationToken ct)
+    {
+        if (!double.IsFinite(dto.Latitude) || dto.Latitude is < -90 or > 90 ||
+            !double.IsFinite(dto.Longitude) || dto.Longitude is < -180 or > 180)
+            throw new FamilyTreeValidationException("FAMILY_LOCATION_INVALID", "Latitude and longitude must be valid coordinates.");
+
+        var tree = await EnsureUserFamilyTreeAsync(userId, ct);
+        var member = await context.FamilyMembers.SingleOrDefaultAsync(x => x.Id == memberId && x.FamilyTreeId == tree.Id, ct)
+            ?? throw new KeyNotFoundException();
+        var normalizedAddress = FamilyAddressNormalizer.Normalize(member.Address);
+        var displayName = string.IsNullOrWhiteSpace(dto.DisplayName)
+            ? (normalizedAddress ?? "User confirmed location")
+            : dto.DisplayName.Trim();
+        member.Latitude = dto.Latitude;
+        member.Longitude = dto.Longitude;
+        member.GeocodedAddress = normalizedAddress;
+        member.LocationDisplayName = displayName[..Math.Min(displayName.Length, 500)];
+        member.GeocodedAt = timeProvider.GetUtcNow().UtcDateTime;
+        member.LocationSource = "MANUAL";
+        member.UpdatedAt = DateTime.UtcNow;
+        await context.SaveChangesAsync(ct);
+        return (await GetMemberByIdAsync(userId, memberId, ct))!;
     }
 
     public async Task<bool> DeleteMemberAsync(int userId, int id, CancellationToken ct)
@@ -303,10 +332,23 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
 
     private IQueryable<FamilyMember> MembersQuery(long treeId) => context.FamilyMembers.AsNoTracking().Where(x => x.FamilyTreeId == treeId).AsSplitQuery().Include(x => x.Father).Include(x => x.Mother).Include(x => x.Spouse)
         .Include(x => x.ChildrenAsFather).Include(x => x.ChildrenAsMother).Include(x => x.RelationsAsMember1).Include(x => x.RelationsAsMember2);
-    private static FamilyMemberDto Map(FamilyMember member)
+    private FamilyMemberDto Map(FamilyMember member)
     {
         var children = member.ChildrenAsFather.Concat(member.ChildrenAsMother).DistinctBy(x => x.Id).ToList();
+        var canGeocode = geocodingOptions.Value.Enabled && string.Equals(geocodingOptions.Value.Provider, "Nominatim", StringComparison.OrdinalIgnoreCase);
+        var locationStatus = FamilyMapMemberStatusResolver.Resolve(member.Address, member.GeocodedAddress, member.GeocodedAt,
+            member.Latitude, member.Longitude, member.LocationDisplayName, canGeocode, geocodingOptions.Value.FailureCacheHours,
+            timeProvider.GetUtcNow().UtcDateTime, member.LocationSource);
+        var status = locationStatus switch
+        {
+            FamilyMapMemberLocationStatus.NoAddress => "NO_ADDRESS",
+            FamilyMapMemberLocationStatus.Pending => "PENDING",
+            FamilyMapMemberLocationStatus.Failed => "FAILED",
+            FamilyMapMemberLocationStatus.Located => "LOCATED",
+            _ => "UNAVAILABLE",
+        };
         return new FamilyMemberDto { Id = member.Id, FullName = member.FullName, Generation = member.Generation, Gender = member.Gender, DateOfBirth = member.DateOfBirth, LifeStatus = member.LifeStatus, DeathDate = member.DeathDate, Role = member.Role, Address = member.Address,
+            Latitude = member.Latitude, Longitude = member.Longitude, LocationDisplayName = member.LocationDisplayName, LocationSource = member.LocationSource, LocationStatus = status,
             PhoneNumber = member.PhoneNumber, FacebookUrl = member.FacebookUrl, InstagramUrl = member.InstagramUrl,
             AvatarUrl = string.IsNullOrWhiteSpace(member.AvatarDriveFileId) ? member.AvatarUrl : null,
             HasManagedAvatar = !string.IsNullOrWhiteSpace(member.AvatarDriveFileId), Biography = member.Biography,

@@ -47,6 +47,8 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         var a = await User(); var b = await User();
         var aMember = await Create(a.Token, "A member", new() { ["address"] = "Quận 1, TP. Hồ Chí Minh" });
         var bMember = await Create(b.Token, "B private member", new() { ["address"] = "Hà Nội" });
+        await WaitForGeocodeAsync(aMember);
+        await WaitForGeocodeAsync(bMember);
         var geocoder = factory.Services.GetRequiredService<TestGeocodingService>();
         var initialGeocoderCalls = geocoder.Calls;
         await using (var scope = factory.Services.CreateAsyncScope())
@@ -80,13 +82,17 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
 
         using (var updated = await Send(a.Token, HttpMethod.Put, $"/api/family-tree/{aMember}", Member("A member", new() { ["address"] = "Đà Nẵng" })))
             Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+        var changedLocation = await WaitForGeocodeAsync(aMember);
+        Assert.Equal("Đà Nẵng", changedLocation.Address);
+        Assert.Equal("Đà Nẵng", changedLocation.GeocodedAddress);
         await using (var scope = factory.Services.CreateAsyncScope())
         {
             var changed = await scope.ServiceProvider.GetRequiredService<AppDbContext>().FamilyMembers.SingleAsync(x => x.Id == aMember);
-            Assert.Null(changed.Latitude); Assert.Null(changed.Longitude); Assert.Null(changed.GeocodedAddress);
-            Assert.Null(changed.LocationDisplayName); Assert.Null(changed.GeocodedAt);
+            Assert.NotNull(changed.Latitude); Assert.NotNull(changed.Longitude);
+            Assert.Equal("GEOCODED", changed.LocationSource);
         }
 
+        var beforeNoAddressMember = geocoder.Calls;
         var withoutAddress = await User();
         await Create(withoutAddress.Token, "No address");
         using (var noAddressMap = await Send(withoutAddress.Token, HttpMethod.Get, "/api/family-tree/map"))
@@ -97,7 +103,7 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
             Assert.Equal(1, noAddressData.GetProperty("noAddressMembers").GetInt32());
             Assert.Equal(0, noAddressData.GetProperty("failedGeocodingMembers").GetInt32());
         }
-        Assert.Equal(initialGeocoderCalls, geocoder.Calls);
+        Assert.Equal(beforeNoAddressMember, geocoder.Calls);
     }
 
     [Fact]
@@ -107,12 +113,8 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         var geocoder = factory.Services.GetRequiredService<TestGeocodingService>();
         var initialGeocoderCalls = geocoder.Calls;
         var locatedId = await Create(user.Token, "Locatable", new() { ["address"] = "Quận 1, TP. Hồ Chí Minh" });
-        using (var first = await Send(user.Token, HttpMethod.Get, "/api/family-tree/map"))
-        {
-            Assert.Equal(HttpStatusCode.OK, first.StatusCode);
-            Assert.Equal(1, (await Body(first)).GetProperty("data").GetProperty("pendingGeocodingMembers").GetInt32());
-        }
         var found = await WaitForGeocodeAsync(locatedId);
+        Assert.Equal("Quận 1, TP. Hồ Chí Minh", found.Address);
         Assert.NotNull(found.Latitude); Assert.Equal("Ho Chi Minh City, Vietnam", found.LocationDisplayName);
         using (var cached = await Send(user.Token, HttpMethod.Get, "/api/family-tree/map"))
         {
@@ -123,11 +125,6 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         }
 
         var unresolvedId = await Create(user.Token, "Unresolved", new() { ["address"] = "unresolved address" });
-        using (var first = await Send(user.Token, HttpMethod.Get, "/api/family-tree/map"))
-        {
-            Assert.Equal(HttpStatusCode.OK, first.StatusCode);
-            Assert.Equal(1, (await Body(first)).GetProperty("data").GetProperty("pendingGeocodingMembers").GetInt32());
-        }
         var failed = await WaitForGeocodeAsync(unresolvedId);
         Assert.Null(failed.Latitude); Assert.Null(failed.Longitude);
         using (var cachedFailure = await Send(user.Token, HttpMethod.Get, "/api/family-tree/map"))
@@ -141,18 +138,71 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         }
         Assert.Equal(initialGeocoderCalls + 2, geocoder.Calls);
 
-        async Task<MyLife.Shared.Entities.FamilyMember> WaitForGeocodeAsync(int memberId)
+    }
+
+    [Fact]
+    public async Task Manual_location_is_persisted_and_address_edits_return_to_background_geocoding()
+    {
+        var owner = await User();
+        var other = await User();
+        var memberId = await Create(owner.Token, "Manual location member", new() { ["address"] = "Địa chỉ chưa định vị" });
+        await WaitForGeocodeAsync(memberId);
+        var geocoder = factory.Services.GetRequiredService<TestGeocodingService>();
+        var beforeManual = geocoder.Calls;
+
+        using (var invalid = await Send(owner.Token, HttpMethod.Put, $"/api/family-tree/{memberId}/location", new { latitude = 200d, longitude = 106d }))
+            Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        using (var forbidden = await Send(other.Token, HttpMethod.Put, $"/api/family-tree/{memberId}/location", new { latitude = 10.123456d, longitude = 106.654321d }))
+            Assert.Equal(HttpStatusCode.NotFound, forbidden.StatusCode);
+        using (var saved = await Send(owner.Token, HttpMethod.Put, $"/api/family-tree/{memberId}/location", new { latitude = 10.123456d, longitude = 106.654321d, displayName = "Vị trí đã xác nhận" }))
         {
-            var until = DateTime.UtcNow.AddSeconds(25);
-            while (DateTime.UtcNow < until)
-            {
-                await using var scope = factory.Services.CreateAsyncScope();
-                var value = await scope.ServiceProvider.GetRequiredService<AppDbContext>().FamilyMembers.AsNoTracking().SingleAsync(x => x.Id == memberId);
-                if (value.GeocodedAt is not null) return value;
-                await Task.Delay(50);
-            }
-            throw new TimeoutException("Background family map geocoding did not finish.");
+            Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+            var result = (await Body(saved)).GetProperty("data");
+            Assert.Equal("MANUAL", result.GetProperty("locationSource").GetString());
+            Assert.Equal("LOCATED", result.GetProperty("locationStatus").GetString());
         }
+        using (var map = await Send(owner.Token, HttpMethod.Get, "/api/family-tree/map"))
+        {
+            var result = (await Body(map)).GetProperty("data");
+            Assert.Equal(1, result.GetProperty("locatedMembers").GetInt32());
+            Assert.Equal(10.123456d, result.GetProperty("locations")[0].GetProperty("latitude").GetDouble());
+        }
+        Assert.Equal(beforeManual, geocoder.Calls);
+
+        using (var changed = await Send(owner.Token, HttpMethod.Put, $"/api/family-tree/{memberId}", Member("Manual location member", new() { ["address"] = "Địa chỉ mới" })))
+            Assert.Equal(HttpStatusCode.OK, changed.StatusCode);
+        var geocoded = await WaitForGeocodeAsync(memberId);
+        Assert.Equal("GEOCODED", geocoded.LocationSource);
+        Assert.Equal("Địa chỉ mới", geocoded.GeocodedAddress);
+
+        var callsAfterChangedAddress = geocoder.Calls;
+        using (var sameAddress = await Send(owner.Token, HttpMethod.Put, $"/api/family-tree/{memberId}", Member("Manual location member", new() { ["address"] = "Địa chỉ mới" })))
+            Assert.Equal(HttpStatusCode.OK, sameAddress.StatusCode);
+        await Task.Delay(150);
+        Assert.Equal(callsAfterChangedAddress, geocoder.Calls);
+
+        using (var removed = await Send(owner.Token, HttpMethod.Put, $"/api/family-tree/{memberId}", Member("Manual location member", new() { ["address"] = null })))
+            Assert.Equal(HttpStatusCode.OK, removed.StatusCode);
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var cleared = await scope.ServiceProvider.GetRequiredService<AppDbContext>().FamilyMembers.AsNoTracking().SingleAsync(x => x.Id == memberId);
+            Assert.Null(cleared.Address); Assert.Null(cleared.Latitude); Assert.Null(cleared.Longitude);
+            Assert.Null(cleared.GeocodedAddress); Assert.Null(cleared.LocationDisplayName); Assert.Null(cleared.GeocodedAt);
+        }
+    }
+
+    [Fact]
+    public async Task New_address_is_not_lost_when_an_older_member_geocode_is_already_queued()
+    {
+        var user = await User();
+        var memberId = await Create(user.Token, "Changing address", new() { ["address"] = "First address" });
+        using (var changed = await Send(user.Token, HttpMethod.Put, $"/api/family-tree/{memberId}", Member("Changing address", new() { ["address"] = "Second address" })))
+            Assert.Equal(HttpStatusCode.OK, changed.StatusCode);
+
+        var result = await WaitForGeocodeAsync(memberId);
+        Assert.Equal("Second address", result.Address);
+        Assert.Equal("Second address", result.GeocodedAddress);
+        Assert.NotNull(result.Latitude);
     }
 
     [Fact]
@@ -423,6 +473,96 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         Assert.True(legacy.GetProperty("daysUntil").GetInt32() >= 0);
     }
 
+    [Fact]
+    public async Task Relationship_engine_finds_common_family_paths_and_isolates_member_ids()
+    {
+        var owner = await User(); var outsider = await User();
+        var grandfather = await Create(owner.Token, "Grandfather", new() { ["gender"] = "Nam", ["generation"] = 1 });
+        var father = await Create(owner.Token, "Father", new() { ["gender"] = "Nam", ["generation"] = 2, ["fatherId"] = grandfather });
+        var uncle = await Create(owner.Token, "Uncle", new() { ["gender"] = "Nam", ["generation"] = 2, ["fatherId"] = grandfather });
+        var user = await Create(owner.Token, "User", new() { ["gender"] = "Nữ", ["generation"] = 3, ["fatherId"] = father, ["dateOfBirth"] = "1990-01-01" });
+        var sibling = await Create(owner.Token, "Older sister", new() { ["gender"] = "Nữ", ["generation"] = 3, ["fatherId"] = father, ["dateOfBirth"] = "1988-01-01" });
+        var cousin = await Create(owner.Token, "Cousin", new() { ["gender"] = "Nam", ["generation"] = 3, ["fatherId"] = uncle });
+        var unrelated = await Create(owner.Token, "Unrelated", new() { ["generation"] = 1 });
+        await Create(outsider.Token, "Foreign member");
+
+        async Task<JsonElement> Relation(int from, int to)
+        {
+            using var response = await Send(owner.Token, HttpMethod.Get, $"/api/family-tree/relationship?fromMemberId={from}&toMemberId={to}");
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            return (await Body(response)).GetProperty("data");
+        }
+        Assert.Equal("SELF", (await Relation(user, user)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("FATHER", (await Relation(user, father)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("DAUGHTER", (await Relation(father, user)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("OLDER_SISTER", (await Relation(user, sibling)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("GRANDFATHER", (await Relation(user, grandfather)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("PATERNAL_UNCLE", (await Relation(user, uncle)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("COUSIN", (await Relation(user, cousin)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("UNKNOWN", (await Relation(user, unrelated)).GetProperty("relationshipCode").GetString());
+
+        using (var invalid = await Send(owner.Token, HttpMethod.Get, "/api/family-tree/relationship?fromMemberId=0&toMemberId=2"))
+            Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        using (var foreign = await Send(owner.Token, HttpMethod.Get, $"/api/family-tree/relationship?fromMemberId={user}&toMemberId=999999"))
+            Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
+
+        // A cyclic horizontal graph remains bounded by the visited set.
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            db.FamilyRelationships.AddRange(
+                new MyLife.Shared.Entities.FamilyRelationship { Member1Id = user, Member2Id = sibling, RelationType = "SIBLING" },
+                new MyLife.Shared.Entities.FamilyRelationship { Member1Id = sibling, Member2Id = cousin, RelationType = "SIBLING" },
+                new MyLife.Shared.Entities.FamilyRelationship { Member1Id = cousin, Member2Id = user, RelationType = "SIBLING" });
+            await db.SaveChangesAsync();
+        }
+        _ = await Relation(user, cousin);
+    }
+
+    [Fact]
+    public async Task Timeline_derives_life_events_and_supports_scoped_custom_event_crud_and_profile()
+    {
+        var owner = await User(); var other = await User();
+        var member = await Create(owner.Token, "Timeline member", new()
+        {
+            ["gender"] = "Nam", ["dateOfBirth"] = "1950-01-01", ["lifeStatus"] = "DECEASED", ["deathDate"] = "2020-01-01"
+        });
+        var unrelated = await Create(owner.Token, "Unrelated");
+
+        using var initial = await Send(owner.Token, HttpMethod.Get, "/api/family-tree/timeline");
+        Assert.Equal(HttpStatusCode.OK, initial.StatusCode);
+        var initialEvents = (await Body(initial)).GetProperty("data").EnumerateArray().ToArray();
+        Assert.Contains(initialEvents, e => e.GetProperty("eventType").GetString() == "BIRTH" && e.GetProperty("eventYear").GetInt32() == 1950 && e.GetProperty("isDerived").GetBoolean());
+        Assert.Contains(initialEvents, e => e.GetProperty("eventType").GetString() == "DEATH" && e.GetProperty("eventYear").GetInt32() == 2020 && e.GetProperty("isDerived").GetBoolean());
+
+        var payload = new { memberId = member, eventType = "ADDRESS_CHANGE", title = "Moved to Ho Chi Minh City", eventYear = 1975, isApproximate = true, location = "Ho Chi Minh City", latitude = 10.7769, longitude = 106.7009 };
+        using var created = await Send(owner.Token, HttpMethod.Post, "/api/family-tree/timeline", payload);
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var createdData = (await Body(created)).GetProperty("data");
+        var eventId = createdData.GetProperty("id").GetInt64();
+        Assert.True(createdData.GetProperty("isApproximate").GetBoolean());
+        using var memberTimeline = await Send(owner.Token, HttpMethod.Get, $"/api/family-tree/{member}/timeline");
+        var scoped = (await Body(memberTimeline)).GetProperty("data").EnumerateArray().ToArray();
+        Assert.Equal("BIRTH", scoped[0].GetProperty("eventType").GetString());
+        Assert.Equal("ADDRESS_CHANGE", scoped[1].GetProperty("eventType").GetString());
+        Assert.Equal("DEATH", scoped[2].GetProperty("eventType").GetString());
+        Assert.DoesNotContain(scoped, e => e.TryGetProperty("memberId", out var id) && id.ValueKind == JsonValueKind.Number && id.GetInt32() == unrelated);
+
+        using var updated = await Send(owner.Token, HttpMethod.Put, $"/api/family-tree/timeline/{eventId}", payload with { title = "Moved to HCMC" });
+        Assert.Equal("Moved to HCMC", (await Body(updated)).GetProperty("data").GetProperty("title").GetString());
+        using var foreignUpdate = await Send(other.Token, HttpMethod.Put, $"/api/family-tree/timeline/{eventId}", payload);
+        Assert.Equal(HttpStatusCode.NotFound, foreignUpdate.StatusCode);
+        using var deleted = await Send(owner.Token, HttpMethod.Delete, $"/api/family-tree/timeline/{eventId}");
+        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+        using var foreignProfile = await Send(other.Token, HttpMethod.Get, $"/api/family-tree/{member}/profile");
+        Assert.Equal(HttpStatusCode.NotFound, foreignProfile.StatusCode);
+        using var profile = await Send(owner.Token, HttpMethod.Get, $"/api/family-tree/{member}/profile");
+        Assert.Equal(HttpStatusCode.OK, profile.StatusCode);
+        var profileData = (await Body(profile)).GetProperty("data");
+        Assert.Equal(member, profileData.GetProperty("member").GetProperty("id").GetInt32());
+        Assert.False(profileData.GetProperty("libraryMemberLinkAvailable").GetBoolean());
+    }
+
     private static Dictionary<string, object?> Anniversary(string title, int? memberId, string originalSolarDate = "2024-02-10", bool leap = false) => new()
     {
         ["eventType"] = "DEATH_ANNIVERSARY", ["title"] = title, ["relatedMemberId"] = memberId,
@@ -462,6 +602,18 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         return (await Body(response)).GetProperty("data").GetProperty("id").GetInt32();
     }
     private async Task<JsonElement[]> List(string token) { using var response = await Send(token, HttpMethod.Get, "/api/family-tree"); Assert.Equal(HttpStatusCode.OK, response.StatusCode); return (await Body(response)).GetProperty("data").EnumerateArray().ToArray(); }
+    private async Task<MyLife.Shared.Entities.FamilyMember> WaitForGeocodeAsync(int memberId)
+    {
+        var until = DateTime.UtcNow.AddSeconds(35);
+        while (DateTime.UtcNow < until)
+        {
+            await using var scope = factory.Services.CreateAsyncScope();
+            var value = await scope.ServiceProvider.GetRequiredService<AppDbContext>().FamilyMembers.AsNoTracking().SingleAsync(x => x.Id == memberId);
+            if (value.GeocodedAt is not null) return value;
+            await Task.Delay(50);
+        }
+        throw new TimeoutException("Background family map geocoding did not finish.");
+    }
     private Task<HttpResponseMessage> Send(string token, HttpMethod method, string path, object? body = null)
     {
         var request = new HttpRequestMessage(method, path) { Content = body is null ? null : JsonContent.Create(body) }; request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);

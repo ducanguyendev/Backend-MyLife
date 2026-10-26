@@ -76,6 +76,9 @@ builder.Services.AddScoped<IGoogleCredentialVerifier, GoogleCredentialVerifier>(
 builder.Services.AddScoped<IGoogleDriveAvatarService, GoogleDriveAvatarService>();
 builder.Services.AddScoped<IGoogleAvatarSyncService, GoogleAvatarSyncService>();
 builder.Services.AddScoped<IFamilyTreeService, FamilyTreeService>();
+builder.Services.AddScoped<IFamilyRelationshipService, FamilyRelationshipService>();
+builder.Services.AddScoped<IFamilyTimelineService, FamilyTimelineService>();
+builder.Services.AddScoped<IFamilyMemberProfileService, FamilyMemberProfileService>();
 builder.Services.Configure<GeocodingOptions>(builder.Configuration.GetSection("Geocoding"));
 builder.Services.AddHttpClient<IGeocodingService, NominatimGeocodingService>(client =>
 {

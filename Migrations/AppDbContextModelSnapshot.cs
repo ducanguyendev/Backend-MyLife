@@ -209,6 +209,11 @@ namespace MyLife.Migrations
                         .HasColumnType("character varying(500)")
                         .HasColumnName("location_display_name");
 
+                    b.Property<string>("LocationSource")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("location_source");
+
                     b.Property<double?>("Longitude")
                         .HasColumnType("double precision")
                         .HasColumnName("longitude");
@@ -287,6 +292,105 @@ namespace MyLife.Migrations
                         .IsUnique();
 
                     b.ToTable("family_relationships", (string)null);
+                });
+
+            modelBuilder.Entity("MyLife.Shared.Entities.FamilyTimelineEvent", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)")
+                        .HasColumnName("description");
+
+                    b.Property<DateOnly?>("EventDate")
+                        .HasColumnType("date")
+                        .HasColumnName("event_date");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("event_type");
+
+                    b.Property<int?>("EventYear")
+                        .HasColumnType("integer")
+                        .HasColumnName("event_year");
+
+                    b.Property<long>("FamilyTreeId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("family_tree_id");
+
+                    b.Property<bool>("IsApproximate")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_approximate");
+
+                    b.Property<double?>("Latitude")
+                        .HasColumnType("double precision")
+                        .HasColumnName("latitude");
+
+                    b.Property<string>("Location")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("location");
+
+                    b.Property<double?>("Longitude")
+                        .HasColumnType("double precision")
+                        .HasColumnName("longitude");
+
+                    b.Property<int?>("MemberId")
+                        .HasColumnType("integer")
+                        .HasColumnName("member_id");
+
+                    b.Property<int?>("RelatedMemberId")
+                        .HasColumnType("integer")
+                        .HasColumnName("related_member_id");
+
+                    b.Property<long?>("SourceId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("source_id");
+
+                    b.Property<string>("SourceType")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("source_type");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("title");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MemberId");
+
+                    b.HasIndex("RelatedMemberId");
+
+                    b.HasIndex("FamilyTreeId", "MemberId");
+
+                    b.HasIndex("FamilyTreeId", "EventDate", "EventYear");
+
+                    b.ToTable("family_timeline_events", (string)null);
                 });
 
             modelBuilder.Entity("MyLife.Shared.Entities.FamilyTree", b =>
@@ -891,6 +995,31 @@ namespace MyLife.Migrations
                     b.Navigation("Member2");
                 });
 
+            modelBuilder.Entity("MyLife.Shared.Entities.FamilyTimelineEvent", b =>
+                {
+                    b.HasOne("MyLife.Shared.Entities.FamilyTree", "FamilyTree")
+                        .WithMany("TimelineEvents")
+                        .HasForeignKey("FamilyTreeId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("MyLife.Shared.Entities.FamilyMember", "Member")
+                        .WithMany()
+                        .HasForeignKey("MemberId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("MyLife.Shared.Entities.FamilyMember", "RelatedMember")
+                        .WithMany()
+                        .HasForeignKey("RelatedMemberId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("FamilyTree");
+
+                    b.Navigation("Member");
+
+                    b.Navigation("RelatedMember");
+                });
+
             modelBuilder.Entity("MyLife.Shared.Entities.FamilyTree", b =>
                 {
                     b.HasOne("MyLife.Shared.Entities.User", "OwnerUser")
@@ -1000,6 +1129,8 @@ namespace MyLife.Migrations
                     b.Navigation("Anniversaries");
 
                     b.Navigation("Members");
+
+                    b.Navigation("TimelineEvents");
                 });
 
             modelBuilder.Entity("MyLife.Shared.Entities.LibraryAlbum", b =>

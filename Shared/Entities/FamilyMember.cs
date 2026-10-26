@@ -59,6 +59,10 @@ namespace MyLife.Shared.Entities
         [Column("geocoded_at", TypeName = "timestamp with time zone")]
         public DateTime? GeocodedAt { get; set; }
 
+        [Column("location_source")]
+        [MaxLength(16)]
+        public string? LocationSource { get; set; }
+
         [Column("phone_number")]
         [MaxLength(20)]
         public string? PhoneNumber { get; set; }
