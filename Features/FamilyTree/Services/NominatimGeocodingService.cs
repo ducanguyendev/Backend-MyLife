@@ -18,16 +18,19 @@ public sealed class GeocodingOptions
     public int MinIntervalMilliseconds { get; set; } = 1100;
     public int FailureCacheHours { get; set; } = 24;
     public int MaxQueuePerRequest { get; set; } = 5;
+    public bool VietMapEnabled { get; set; } = true;
+    public string VietMapBaseUrl { get; set; } = "https://maps.vietmap.vn";
+    public int VietMapDisplayType { get; set; } = 5;
 
     public int EffectiveMinIntervalMilliseconds => Math.Max(1000, MinIntervalMilliseconds);
 }
 
-public sealed class NominatimGeocodingService(HttpClient client, IOptions<GeocodingOptions> options, ILogger<NominatimGeocodingService> logger, IMemoryCache cache) : IGeocodingService
+public sealed class NominatimGeocodingService(HttpClient client, IOptions<GeocodingOptions> options, ILogger<NominatimGeocodingService> logger, IMemoryCache cache)
 {
     public async Task<GeocodingResult?> GeocodeAsync(string address, CancellationToken cancellationToken)
     {
         var settings = options.Value;
-        if (!settings.Enabled || !string.Equals(settings.Provider, "Nominatim", StringComparison.OrdinalIgnoreCase)) return null;
+        if (!settings.Enabled) return null;
         var normalizedAddress = FamilyAddressNormalizer.Normalize(address);
         if (normalizedAddress is null) return null;
         var cacheDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalizedAddress.ToUpperInvariant())));
@@ -70,7 +73,7 @@ public sealed class NominatimGeocodingService(HttpClient client, IOptions<Geocod
                 return null;
             }
             var result = new GeocodingResult(selected.Latitude, selected.Longitude, selected.DisplayName);
-            logger.LogDebug("Nominatim selected {DisplayName} for address fingerprint {AddressFingerprint}.", result.DisplayName, cacheDigest[..12]);
+            logger.LogDebug("Nominatim selected a location for address fingerprint {AddressFingerprint}.", cacheDigest[..12]);
             CacheResult(cacheKey, result, TimeSpan.FromDays(365));
             return result;
         }

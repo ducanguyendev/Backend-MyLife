@@ -335,7 +335,7 @@ public sealed class FamilyTreeService(AppDbContext context, IGoogleDriveMemberAv
     private FamilyMemberDto Map(FamilyMember member)
     {
         var children = member.ChildrenAsFather.Concat(member.ChildrenAsMother).DistinctBy(x => x.Id).ToList();
-        var canGeocode = geocodingOptions.Value.Enabled && string.Equals(geocodingOptions.Value.Provider, "Nominatim", StringComparison.OrdinalIgnoreCase);
+        var canGeocode = geocodingOptions.Value.Enabled;
         var locationStatus = FamilyMapMemberStatusResolver.Resolve(member.Address, member.GeocodedAddress, member.GeocodedAt,
             member.Latitude, member.Longitude, member.LocationDisplayName, canGeocode, geocodingOptions.Value.FailureCacheHours,
             timeProvider.GetUtcNow().UtcDateTime, member.LocationSource);

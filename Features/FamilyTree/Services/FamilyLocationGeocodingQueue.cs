@@ -73,7 +73,8 @@ public sealed class FamilyLocationGeocodingQueue : BackgroundService, IFamilyLoc
         if (remaining > 0) await Task.Delay(remaining, ct);
         lastRequestAt = DateTimeOffset.UtcNow;
         var geocoder = scope.ServiceProvider.GetRequiredService<IGeocodingService>();
-        logger.LogDebug("Family map geocode queued member {MemberId} for normalized address {Address}.", item.MemberId, item.Address);
+        logger.LogDebug("Family map geocode queued member {MemberId} for address fingerprint {AddressFingerprint}.", item.MemberId,
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(item.Address.ToUpperInvariant())))[..12]);
         var result = await geocoder.GeocodeAsync(item.Address, ct);
 
         // The address may have changed while the upstream request was in flight.
@@ -94,7 +95,7 @@ public sealed class FamilyLocationGeocodingQueue : BackgroundService, IFamilyLoc
             longitude = location.Longitude;
             displayName = location.DisplayName.Trim()[..Math.Min(location.DisplayName.Trim().Length, 500)];
             locationSource = "GEOCODED";
-            logger.LogDebug("Family map geocode succeeded for member {MemberId}: {DisplayName}.", item.MemberId, displayName);
+            logger.LogDebug("Family map geocode succeeded for member {MemberId}.", item.MemberId);
         }
         else
         {
@@ -135,7 +136,7 @@ public sealed class FamilyMapService(AppDbContext db, IFamilyLocationGeocodingQu
             .Select(x => new { x.Id, x.FullName, x.Generation, x.Address, x.GeocodedAddress, x.GeocodedAt, x.Latitude, x.Longitude, x.LocationDisplayName, x.LocationSource })
             .OrderBy(x => x.Generation).ThenBy(x => x.FullName).ToListAsync(ct);
 
-        var canGeocode = settings.Value.Enabled && string.Equals(settings.Value.Provider, "Nominatim", StringComparison.OrdinalIgnoreCase);
+        var canGeocode = settings.Value.Enabled;
         var now = DateTime.UtcNow;
         var states = members.Select(member =>
         {

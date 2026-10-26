@@ -80,12 +80,14 @@ builder.Services.AddScoped<IFamilyRelationshipService, FamilyRelationshipService
 builder.Services.AddScoped<IFamilyTimelineService, FamilyTimelineService>();
 builder.Services.AddScoped<IFamilyMemberProfileService, FamilyMemberProfileService>();
 builder.Services.Configure<GeocodingOptions>(builder.Configuration.GetSection("Geocoding"));
-builder.Services.AddHttpClient<IGeocodingService, NominatimGeocodingService>(client =>
+builder.Services.AddHttpClient<NominatimGeocodingService>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(8);
     client.DefaultRequestHeaders.UserAgent.ParseAdd(builder.Configuration["Geocoding:UserAgent"] ?? "MyLife/1.0 (family-tree-project)");
     client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("vi");
 });
+builder.Services.AddHttpClient(nameof(VietMapGeocodingService), client => client.Timeout = TimeSpan.FromSeconds(8));
+builder.Services.AddScoped<IGeocodingService, VietMapGeocodingService>();
 builder.Services.AddSingleton<FamilyLocationGeocodingQueue>();
 builder.Services.AddSingleton<IFamilyLocationGeocodingQueue>(provider => provider.GetRequiredService<FamilyLocationGeocodingQueue>());
 builder.Services.AddHostedService(provider => provider.GetRequiredService<FamilyLocationGeocodingQueue>());
