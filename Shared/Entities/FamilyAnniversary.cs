@@ -9,8 +9,8 @@ public sealed class FamilyAnniversary
     public FamilyMember? RelatedMember { get; set; }
     public string EventType { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
-    public int LunarDay { get; set; }
-    public int LunarMonth { get; set; }
+    public int? LunarDay { get; set; }
+    public int? LunarMonth { get; set; }
     public bool IsLeapMonth { get; set; }
     public DateOnly? OriginalSolarDate { get; set; }
     public int? LunarYear { get; set; }

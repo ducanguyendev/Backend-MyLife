@@ -500,8 +500,16 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
 
         var familyEvent = Anniversary("Family event", livingId);
         familyEvent["eventType"] = "FAMILY_EVENT";
+        familyEvent["originalSolarDate"] = "2026-10-30";
+        familyEvent.Remove("lunarDay"); familyEvent.Remove("lunarMonth"); familyEvent.Remove("lunarYear");
+        familyEvent.Remove("isLeapMonth");
         using var allowed = await Send(user.Token, HttpMethod.Post, "/api/family-tree/anniversaries", familyEvent);
         Assert.Equal(HttpStatusCode.Created, allowed.StatusCode);
+        var createdFamilyEvent = (await Body(allowed)).GetProperty("data");
+        Assert.Equal(JsonValueKind.Null, createdFamilyEvent.GetProperty("lunarDay").ValueKind);
+        Assert.Equal(JsonValueKind.Null, createdFamilyEvent.GetProperty("lunarMonth").ValueKind);
+        Assert.Equal(JsonValueKind.Null, createdFamilyEvent.GetProperty("lunarYear").ValueKind);
+        Assert.Equal("2026-10-30", createdFamilyEvent.GetProperty("originalSolarDate").GetString());
     }
 
     [Fact]

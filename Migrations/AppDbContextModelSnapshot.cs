@@ -58,11 +58,11 @@ namespace MyLife.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("is_leap_month");
 
-                    b.Property<int>("LunarDay")
+                    b.Property<int?>("LunarDay")
                         .HasColumnType("integer")
                         .HasColumnName("lunar_day");
 
-                    b.Property<int>("LunarMonth")
+                    b.Property<int?>("LunarMonth")
                         .HasColumnType("integer")
                         .HasColumnName("lunar_month");
 

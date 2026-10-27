@@ -213,8 +213,8 @@ namespace MyLife.Shared.Data
                 entity.Property(e => e.RelatedMemberId).HasColumnName("related_member_id");
                 entity.Property(e => e.EventType).HasColumnName("event_type").HasMaxLength(32).IsRequired();
                 entity.Property(e => e.Title).HasColumnName("title").HasMaxLength(200).IsRequired();
-                entity.Property(e => e.LunarDay).HasColumnName("lunar_day").IsRequired();
-                entity.Property(e => e.LunarMonth).HasColumnName("lunar_month").IsRequired();
+                entity.Property(e => e.LunarDay).HasColumnName("lunar_day");
+                entity.Property(e => e.LunarMonth).HasColumnName("lunar_month");
                 entity.Property(e => e.IsLeapMonth).HasColumnName("is_leap_month").HasDefaultValue(false).IsRequired();
                 entity.Property(e => e.OriginalSolarDate).HasColumnName("original_solar_date");
                 entity.Property(e => e.LunarYear).HasColumnName("lunar_year");

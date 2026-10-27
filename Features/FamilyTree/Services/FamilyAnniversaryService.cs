@@ -35,13 +35,14 @@ public sealed class FamilyAnniversaryService(
         ValidateOriginalDate(values.EventType, dto);
         var member = await ResolveMember(tree.Id, dto.RelatedMemberId, ct);
         ValidateRelatedMember(values.EventType, dto.OriginalSolarDate, member);
-        EnsureRecurringDate(values.LunarDay, values.LunarMonth, dto.IsLeapMonth);
+        if (values.EventType == "DEATH_ANNIVERSARY") EnsureRecurringDate(values.LunarDay!.Value, values.LunarMonth!.Value, dto.IsLeapMonth);
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var entity = new FamilyAnniversary
         {
             FamilyTreeId = tree.Id, RelatedMemberId = member?.Id, EventType = values.EventType,
             Title = values.Title, LunarDay = values.LunarDay, LunarMonth = values.LunarMonth,
-            IsLeapMonth = dto.IsLeapMonth, OriginalSolarDate = dto.OriginalSolarDate, LunarYear = dto.LunarYear,
+            IsLeapMonth = values.EventType == "DEATH_ANNIVERSARY" && dto.IsLeapMonth, OriginalSolarDate = dto.OriginalSolarDate,
+            LunarYear = values.EventType == "DEATH_ANNIVERSARY" ? dto.LunarYear : null,
             Place = values.Place, Host = values.Host, Notes = values.Notes,
             CreatedAt = now, UpdatedAt = now,
         };
@@ -59,10 +60,10 @@ public sealed class FamilyAnniversaryService(
         ValidateOriginalDate(values.EventType, dto);
         var member = await ResolveMember(tree.Id, dto.RelatedMemberId, ct);
         ValidateRelatedMember(values.EventType, dto.OriginalSolarDate, member);
-        EnsureRecurringDate(values.LunarDay, values.LunarMonth, dto.IsLeapMonth);
+        if (values.EventType == "DEATH_ANNIVERSARY") EnsureRecurringDate(values.LunarDay!.Value, values.LunarMonth!.Value, dto.IsLeapMonth);
         entity.EventType = values.EventType; entity.Title = values.Title; entity.RelatedMemberId = member?.Id;
-        entity.LunarDay = values.LunarDay; entity.LunarMonth = values.LunarMonth; entity.IsLeapMonth = dto.IsLeapMonth;
-        entity.OriginalSolarDate = dto.OriginalSolarDate; entity.LunarYear = dto.LunarYear;
+        entity.LunarDay = values.LunarDay; entity.LunarMonth = values.LunarMonth; entity.IsLeapMonth = values.EventType == "DEATH_ANNIVERSARY" && dto.IsLeapMonth;
+        entity.OriginalSolarDate = dto.OriginalSolarDate; entity.LunarYear = values.EventType == "DEATH_ANNIVERSARY" ? dto.LunarYear : null;
         entity.Place = values.Place; entity.Host = values.Host; entity.Notes = values.Notes; entity.UpdatedAt = timeProvider.GetUtcNow().UtcDateTime;
         await db.SaveChangesAsync(ct);
         return Map(await Query(tree.Id).SingleAsync(a => a.Id == id, ct), calendar.GetVietnamToday());
@@ -117,14 +118,16 @@ public sealed class FamilyAnniversaryService(
             throw Invalid("FAMILY_ANNIVERSARY_DEATH_DATE_MISMATCH", "The original solar date must match the linked family member's death date.");
     }
 
-    private (string EventType, string Title, int LunarDay, int LunarMonth, string? Place, string? Host, string? Notes) Validate(FamilyAnniversaryWriteDto dto)
+    private (string EventType, string Title, int? LunarDay, int? LunarMonth, string? Place, string? Host, string? Notes) Validate(FamilyAnniversaryWriteDto dto)
     {
         var eventType = dto.EventType?.Trim().ToUpperInvariant() ?? string.Empty;
         if (!EventTypes.Contains(eventType)) throw Invalid("FAMILY_ANNIVERSARY_INVALID_EVENT_TYPE", "Choose a supported event type.");
         var title = dto.Title?.Trim() ?? string.Empty;
         if (title.Length is < 2 or > 200) throw Invalid("FAMILY_ANNIVERSARY_INVALID_TITLE", "Title must contain 2 to 200 characters.");
-        if (dto.LunarDay is < 1 or > 30) throw Invalid("FAMILY_ANNIVERSARY_INVALID_LUNAR_DATE", "Lunar day must be between 1 and 30.");
-        if (dto.LunarMonth is < 1 or > 12) throw Invalid("FAMILY_ANNIVERSARY_INVALID_LUNAR_DATE", "Lunar month must be between 1 and 12.");
+        if (eventType == "DEATH_ANNIVERSARY" && (dto.LunarDay is null or < 1 or > 30 || dto.LunarMonth is null or < 1 or > 12))
+            throw Invalid("FAMILY_ANNIVERSARY_INVALID_LUNAR_DATE", "Lunar day must be between 1 and 30 and lunar month between 1 and 12.");
+        if (eventType == "FAMILY_EVENT" && dto.OriginalSolarDate is null)
+            throw Invalid("FAMILY_ANNIVERSARY_ORIGINAL_DATE_REQUIRED", "An event date is required.");
         var place = Normalize(dto.Place); var host = Normalize(dto.Host); var notes = Normalize(dto.Notes);
         if (place?.Length > 500) throw Invalid("FAMILY_ANNIVERSARY_INVALID_PLACE", "Place cannot exceed 500 characters.");
         if (host?.Length > 300) throw Invalid("FAMILY_ANNIVERSARY_INVALID_HOST", "Host cannot exceed 300 characters.");
@@ -137,6 +140,8 @@ public sealed class FamilyAnniversaryService(
         if (eventType == "DEATH_ANNIVERSARY" && (dto.OriginalSolarDate is null || dto.LunarYear is null))
             throw Invalid("FAMILY_ANNIVERSARY_ORIGINAL_DATE_REQUIRED", "Original solar date and lunar year are required for a death anniversary.");
 
+        if (eventType == "FAMILY_EVENT") return;
+
         if (dto.OriginalSolarDate is null && dto.LunarYear is null) return;
         if (dto.OriginalSolarDate is null || dto.LunarYear is null)
             throw Invalid("FAMILY_ANNIVERSARY_ORIGINAL_DATE_REQUIRED", "Provide both the original solar date and lunar year.");
@@ -144,7 +149,7 @@ public sealed class FamilyAnniversaryService(
             throw Invalid("FAMILY_ANNIVERSARY_INVALID_LUNAR_DATE", "Lunar year must be between 1800 and 2200.");
 
         DateOnly converted;
-        try { converted = calendar.ConvertLunarToSolar(dto.LunarDay, dto.LunarMonth, dto.LunarYear.Value, dto.IsLeapMonth); }
+        try { converted = calendar.ConvertLunarToSolar(dto.LunarDay!.Value, dto.LunarMonth!.Value, dto.LunarYear.Value, dto.IsLeapMonth); }
         catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
         if (converted != dto.OriginalSolarDate.Value)
             throw Invalid("FAMILY_ANNIVERSARY_DATE_MISMATCH", "The original solar date does not match the supplied lunar date.");
@@ -158,12 +163,37 @@ public sealed class FamilyAnniversaryService(
 
     private FamilyAnniversaryDto Map(FamilyAnniversary item, DateOnly today)
     {
-        (int lunarYear, DateOnly next, int daysUntil) occurrence;
-        try { occurrence = calendar.NextOccurrence(item.LunarDay, item.LunarMonth, item.IsLeapMonth, today); }
-        catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
+        int? nextLunarYear = null;
+        DateOnly next;
+        int daysUntil;
+        if (item.EventType == "DEATH_ANNIVERSARY")
+        {
+            (int lunarYear, DateOnly date, int days) occurrence;
+            try { occurrence = calendar.NextOccurrence(item.LunarDay!.Value, item.LunarMonth!.Value, item.IsLeapMonth, today); }
+            catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
+            nextLunarYear = occurrence.lunarYear; next = occurrence.date; daysUntil = occurrence.days;
+        }
+        else
+        {
+            if (item.OriginalSolarDate is { } original)
+            {
+                var candidateYear = today.Year;
+                var date = new DateOnly(candidateYear, original.Month, Math.Min(original.Day, DateTime.DaysInMonth(candidateYear, original.Month)));
+                if (date < today) { candidateYear++; date = new DateOnly(candidateYear, original.Month, Math.Min(original.Day, DateTime.DaysInMonth(candidateYear, original.Month))); }
+                next = date; daysUntil = next.DayNumber - today.DayNumber;
+            }
+            else
+            {
+                // Preserve the display of legacy family events that predate the solar-date form.
+                (int _, DateOnly date, int days) legacyOccurrence;
+                try { legacyOccurrence = calendar.NextOccurrence(item.LunarDay!.Value, item.LunarMonth!.Value, item.IsLeapMonth, today); }
+                catch (ArgumentException ex) { throw InvalidLunarDate(ex); }
+                next = legacyOccurrence.date; daysUntil = legacyOccurrence.days;
+            }
+        }
         return new(item.Id, item.EventType, item.Title, item.RelatedMemberId,
             item.RelatedMember?.FullName, item.RelatedMember?.Generation, item.RelatedMember?.Role,
-            item.LunarDay, item.LunarMonth, item.IsLeapMonth, item.OriginalSolarDate, item.LunarYear, occurrence.lunarYear, occurrence.next, occurrence.daysUntil,
+            item.LunarDay, item.LunarMonth, item.IsLeapMonth, item.OriginalSolarDate, item.LunarYear, nextLunarYear, next, daysUntil,
             item.Place, item.Host, item.Notes, item.CreatedAt, item.UpdatedAt);
     }
 
