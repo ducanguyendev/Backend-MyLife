@@ -9,16 +9,19 @@ using Xunit;
 public sealed class VietMapGeocodingServiceTests
 {
     [Fact]
-    public async Task AutocompleteAndPlaceSuccessDoesNotCallNominatim()
+    public async Task SearchV4AndPlaceSuccessDoesNotCallNominatimAndPassesReferenceId()
     {
         var vietMap = new StubHandler((request, _) =>
         {
             var query = Uri.UnescapeDataString(request.RequestUri!.Query);
-            if (request.RequestUri.AbsolutePath.EndsWith("autocomplete/v4", StringComparison.Ordinal))
+            if (request.RequestUri.AbsolutePath.EndsWith("search/v4", StringComparison.Ordinal))
             {
                 Assert.Contains("display_type=5", query);
-                return Json("[{\"ref_id\":\"geocode:abc\",\"display\":\"12 Nguyen Trai\"}]");
+                Assert.Contains("text=12%20Nguyen%20Trai", request.RequestUri.Query, StringComparison.Ordinal);
+                return Json("[{\"ref_id\":\"geocode:abc/def\",\"display\":\"12 Nguyen Trai\"}]");
             }
+            Assert.EndsWith("/api/place/v4", request.RequestUri.AbsolutePath);
+            Assert.Contains("refid=geocode%3Aabc%2Fdef", request.RequestUri.Query, StringComparison.OrdinalIgnoreCase);
             return Json("{\"lat\":10.75,\"lng\":106.7,\"display\":\"12 Nguyen Trai, Ho Chi Minh City\"}");
         });
         var nominatim = new StubHandler((_, _) => throw new Xunit.Sdk.XunitException("Unexpected fallback"));
@@ -31,11 +34,12 @@ public sealed class VietMapGeocodingServiceTests
         Assert.Equal("12 Nguyen Trai, Ho Chi Minh City", result?.DisplayName);
         Assert.Equal(2, vietMap.Calls);
         Assert.Equal(0, nominatim.Calls);
-        Assert.DoesNotContain("private-test-key", string.Join(' ', vietMap.Requests.Select(uri => uri.AbsolutePath)));
+        Assert.All(vietMap.Requests, uri => Assert.DoesNotContain("autocomplete", uri.AbsolutePath, StringComparison.OrdinalIgnoreCase));
     }
 
     [Theory]
     [InlineData(HttpStatusCode.Locked)]
+    [InlineData(HttpStatusCode.Unauthorized)]
     [InlineData(HttpStatusCode.InternalServerError)]
     public async Task VietMapHttpFailureFallsBack(HttpStatusCode status)
     {
@@ -62,7 +66,7 @@ public sealed class VietMapGeocodingServiceTests
     [Fact]
     public async Task InvalidPlaceCoordinatesFallBack()
     {
-        var vietMap = new StubHandler((request, _) => request.RequestUri!.AbsolutePath.EndsWith("autocomplete/v4", StringComparison.Ordinal)
+        var vietMap = new StubHandler((request, _) => request.RequestUri!.AbsolutePath.EndsWith("search/v4", StringComparison.Ordinal)
             ? Json("[{\"ref_id\":\"auto:abc\"}]") : Json("{\"lat\":999,\"lng\":106,\"display\":\"invalid\"}"));
         var nominatim = NominatimSuccess();
         var result = await Create(vietMap, nominatim, "key").GeocodeAsync("Some address", CancellationToken.None);
@@ -91,6 +95,21 @@ public sealed class VietMapGeocodingServiceTests
         var service = Create(vietMap, nominatim, "private-test-key", logger);
         Assert.Equal("Ho Chi Minh City", (await service.GeocodeAsync("Some address", CancellationToken.None))?.DisplayName);
         Assert.DoesNotContain(logger.Messages, message => message.Contains("private-test-key", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("Some address", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SearchSuccessUsesValidCandidateAndLogsStructuredFingerprintWithoutSecrets()
+    {
+        var vietMap = new StubHandler((request, _) => request.RequestUri!.AbsolutePath.EndsWith("search/v4", StringComparison.Ordinal)
+            ? Json("[{\"ref_id\":\"\"},{\"ref_id\":\"ref:valid\"}]")
+            : Json("{\"lat\":10.75,\"lng\":106.7,\"display\":\"Valid place\"}"));
+        var logger = new RecordingLogger<VietMapGeocodingService>();
+        var result = await Create(vietMap, new StubHandler((_, _) => throw new Xunit.Sdk.XunitException("Unexpected fallback")), "private-test-key", logger)
+            .GeocodeAsync("Sensitive full address", CancellationToken.None);
+        Assert.Equal("Valid place", result?.DisplayName);
+        Assert.Contains(logger.Messages, message => message.Contains("Provider=VietMap", StringComparison.Ordinal) && message.Contains("CandidateCount=2", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("private-test-key", StringComparison.Ordinal) || message.Contains("Sensitive full address", StringComparison.Ordinal));
     }
 
     private static VietMapGeocodingService Create(StubHandler vietMap, StubHandler nominatim, string? key,

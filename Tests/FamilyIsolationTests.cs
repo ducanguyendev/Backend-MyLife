@@ -141,6 +141,64 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
     }
 
     [Fact]
+    public async Task Retry_geocoding_resets_and_queues_only_unlocated_nonmanual_members_in_the_current_tree()
+    {
+        var owner = await User();
+        var other = await User();
+        var failedId = await Create(owner.Token, "Failed retry", new() { ["address"] = "Retryable address" });
+        var manualId = await Create(owner.Token, "Manual location");
+        var locatedId = await Create(owner.Token, "Already located");
+        var noAddressId = await Create(owner.Token, "No address");
+        var foreignFailedId = await Create(other.Token, "Other tree failed");
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var failed = await db.FamilyMembers.SingleAsync(x => x.Id == failedId);
+            failed.GeocodedAddress = failed.Address; failed.GeocodedAt = DateTime.UtcNow.AddHours(-1);
+            failed.Latitude = null; failed.Longitude = null; failed.LocationDisplayName = null; failed.LocationSource = null;
+            var manual = await db.FamilyMembers.SingleAsync(x => x.Id == manualId);
+            manual.Address = "Manual address"; manual.Latitude = 10.1; manual.Longitude = 106.1;
+            manual.LocationDisplayName = "Manually selected"; manual.LocationSource = "MANUAL";
+            manual.GeocodedAddress = "Keep manual cache"; manual.GeocodedAt = DateTime.UtcNow.AddDays(-1);
+            var located = await db.FamilyMembers.SingleAsync(x => x.Id == locatedId);
+            located.Address = "Located address"; located.Latitude = 10.2; located.Longitude = 106.2;
+            located.LocationDisplayName = "Valid located place"; located.LocationSource = "GEOCODED";
+            located.GeocodedAddress = located.Address; located.GeocodedAt = DateTime.UtcNow;
+            var foreign = await db.FamilyMembers.SingleAsync(x => x.Id == foreignFailedId);
+            foreign.Address = "Foreign failed address"; foreign.GeocodedAddress = foreign.Address;
+            foreign.GeocodedAt = DateTime.UtcNow.AddHours(-2); foreign.Latitude = null; foreign.Longitude = null;
+            await db.SaveChangesAsync();
+        }
+
+        var geocoder = factory.Services.GetRequiredService<TestGeocodingService>();
+        var beforeCalls = geocoder.Calls;
+        using var response = await Send(owner.Token, HttpMethod.Post, "/api/family-tree/map/retry-geocoding");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = (await Body(response)).GetProperty("data");
+        Assert.Equal(1, result.GetProperty("queued").GetInt32());
+        Assert.Equal(1, result.GetProperty("skippedManual").GetInt32());
+        Assert.Equal(1, result.GetProperty("skippedLocated").GetInt32());
+        Assert.Equal(1, result.GetProperty("noAddress").GetInt32());
+
+        var until = DateTime.UtcNow.AddSeconds(5);
+        while (geocoder.Calls == beforeCalls && DateTime.UtcNow < until) await Task.Delay(25);
+        Assert.True(geocoder.Calls > beforeCalls, "The failed member should be re-enqueued.");
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var manual = await db.FamilyMembers.AsNoTracking().SingleAsync(x => x.Id == manualId);
+            Assert.Equal("Manual address", manual.Address); Assert.Equal("MANUAL", manual.LocationSource);
+            Assert.Equal("Keep manual cache", manual.GeocodedAddress); Assert.NotNull(manual.GeocodedAt);
+            var located = await db.FamilyMembers.AsNoTracking().SingleAsync(x => x.Id == locatedId);
+            Assert.Equal("Located address", located.Address); Assert.Equal("GEOCODED", located.LocationSource);
+            Assert.Equal("Located address", located.GeocodedAddress); Assert.NotNull(located.GeocodedAt);
+            var foreign = await db.FamilyMembers.AsNoTracking().SingleAsync(x => x.Id == foreignFailedId);
+            Assert.Equal("Foreign failed address", foreign.GeocodedAddress);
+            Assert.NotNull(foreign.GeocodedAt);
+        }
+    }
+
+    [Fact]
     public async Task Manual_location_is_persisted_and_address_edits_return_to_background_geocoding()
     {
         var owner = await User();

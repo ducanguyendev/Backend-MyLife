@@ -126,6 +126,49 @@ public sealed class FamilyLocationGeocodingQueue : BackgroundService, IFamilyLoc
 
 public sealed class FamilyMapService(AppDbContext db, IFamilyLocationGeocodingQueue queue, IOptions<GeocodingOptions> settings)
 {
+    public async Task<FamilyMapRetryGeocodingResult> RetryFailedGeocodingAsync(int userId, CancellationToken ct)
+    {
+        var treeId = await db.FamilyTrees.AsNoTracking().Where(x => x.OwnerUserId == userId)
+            .Select(x => (long?)x.Id).SingleOrDefaultAsync(ct);
+        if (treeId is null) return new FamilyMapRetryGeocodingResult(0, 0, 0, 0);
+
+        var members = await db.FamilyMembers.Where(x => x.FamilyTreeId == treeId.Value)
+            .Select(x => new { x.Id, x.Address, x.GeocodedAddress, x.GeocodedAt, x.Latitude, x.Longitude, x.LocationDisplayName, x.LocationSource })
+            .ToListAsync(ct);
+        var now = DateTime.UtcNow;
+        var manual = members.Where(x => string.Equals(x.LocationSource, "MANUAL", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var states = members.Select(member => new
+        {
+            Member = member,
+            Status = FamilyMapMemberStatusResolver.Resolve(member.Address, member.GeocodedAddress, member.GeocodedAt,
+                member.Latitude, member.Longitude, member.LocationDisplayName, settings.Value.Enabled,
+                settings.Value.FailureCacheHours, now, member.LocationSource),
+        }).ToArray();
+        var noAddress = states.Count(x => x.Status == FamilyMapMemberLocationStatus.NoAddress);
+        var located = states.Count(x => x.Status == FamilyMapMemberLocationStatus.Located &&
+            !string.Equals(x.Member.LocationSource, "MANUAL", StringComparison.OrdinalIgnoreCase));
+        var retryable = settings.Value.Enabled
+            ? states.Where(x => (x.Status is FamilyMapMemberLocationStatus.Failed or FamilyMapMemberLocationStatus.Pending) &&
+                !string.Equals(x.Member.LocationSource, "MANUAL", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(x.Member.Address)).ToArray()
+            : [];
+        var failedIds = retryable.Where(x => x.Status == FamilyMapMemberLocationStatus.Failed).Select(x => x.Member.Id).ToArray();
+
+        if (failedIds.Length > 0)
+        {
+            await db.FamilyMembers.Where(x => x.FamilyTreeId == treeId.Value && failedIds.Contains(x.Id) &&
+                (x.LocationSource == null || x.LocationSource.ToUpper() != "MANUAL"))
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(x => x.GeocodedAddress, (string?)null)
+                    .SetProperty(x => x.GeocodedAt, (DateTime?)null), ct);
+        }
+
+        foreach (var item in retryable)
+            queue.Enqueue(treeId.Value, item.Member.Id, item.Member.Address!);
+
+        return new FamilyMapRetryGeocodingResult(retryable.Length, manual.Length, located, noAddress);
+    }
+
     public async Task<Features.FamilyTree.DTOs.FamilyMapDto> GetMapAsync(int userId, CancellationToken ct)
     {
         var treeId = await db.FamilyTrees.AsNoTracking().Where(x => x.OwnerUserId == userId).Select(x => (long?)x.Id).SingleOrDefaultAsync(ct);
@@ -158,3 +201,5 @@ public sealed class FamilyMapService(AppDbContext db, IFamilyLocationGeocodingQu
             Members = states.Select(x => new Features.FamilyTree.DTOs.FamilyMapMemberLocationDto { Id = x.Member.Id, FullName = x.Member.FullName, Generation = x.Member.Generation, Address = x.Member.Address, Status = x.Status switch { FamilyMapMemberLocationStatus.NoAddress => "NO_ADDRESS", FamilyMapMemberLocationStatus.Pending => "PENDING", FamilyMapMemberLocationStatus.Failed => "FAILED", FamilyMapMemberLocationStatus.Located => "LOCATED", _ => "UNAVAILABLE" }, Latitude = x.Member.Latitude, Longitude = x.Member.Longitude, LocationDisplayName = x.Member.LocationDisplayName, LocationSource = x.Member.LocationSource }).ToList() };
     }
 }
+
+public sealed record FamilyMapRetryGeocodingResult(int Queued, int SkippedManual, int SkippedLocated, int NoAddress);

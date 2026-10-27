@@ -85,8 +85,8 @@ builder.Services.AddHttpClient<NominatimGeocodingService>(client =>
     client.Timeout = TimeSpan.FromSeconds(8);
     client.DefaultRequestHeaders.UserAgent.ParseAdd(builder.Configuration["Geocoding:UserAgent"] ?? "MyLife/1.0 (family-tree-project)");
     client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("vi");
-});
-builder.Services.AddHttpClient(nameof(VietMapGeocodingService), client => client.Timeout = TimeSpan.FromSeconds(8));
+}).RemoveAllLoggers();
+builder.Services.AddHttpClient(nameof(VietMapGeocodingService), client => client.Timeout = TimeSpan.FromSeconds(8)).RemoveAllLoggers();
 builder.Services.AddScoped<IGeocodingService, VietMapGeocodingService>();
 builder.Services.AddSingleton<FamilyLocationGeocodingQueue>();
 builder.Services.AddSingleton<IFamilyLocationGeocodingQueue>(provider => provider.GetRequiredService<FamilyLocationGeocodingQueue>());
@@ -239,6 +239,11 @@ builder.Services.AddAuthentication(options =>
 });
 
 var app = builder.Build();
+var vietMapApiKey = app.Configuration["VietMap:ApiKey"];
+if (string.IsNullOrWhiteSpace(vietMapApiKey)) vietMapApiKey = Environment.GetEnvironmentVariable("VIETMAP_API_KEY");
+var vietMapEnabled = app.Configuration.GetValue("Geocoding:Enabled", true) && app.Configuration.GetValue("Geocoding:VietMapEnabled", true);
+app.Logger.LogInformation("VIETMAP enabled: {Enabled}", vietMapEnabled);
+app.Logger.LogInformation("VIETMAP API key configured: {Configured}", !string.IsNullOrWhiteSpace(vietMapApiKey));
 
 app.UseMiddleware<RequestContextMiddleware>();
 // Compress data responses, excluding token-issuing auth responses and image bytes.

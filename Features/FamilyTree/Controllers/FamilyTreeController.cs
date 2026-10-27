@@ -21,6 +21,9 @@ public sealed class FamilyTreeController(IFamilyTreeService service, ICurrentUse
     public Task<IActionResult> Generations() => Run(async (_, ct) => Ok(new { success = true, data = await service.GetAllGenerationsAsync(ct) }));
     [HttpGet("map")]
     public Task<IActionResult> Map() => Run(async (userId, ct) => Ok(new { success = true, data = await mapService!.GetMapAsync(userId, ct) }));
+    [HttpPost("map/retry-geocoding")]
+    public Task<IActionResult> RetryMapGeocoding() => Run(async (userId, ct) =>
+        Ok(new { success = true, data = await mapService!.RetryFailedGeocodingAsync(userId, ct) }));
     [HttpGet("relationship")]
     public Task<IActionResult> Relationship([FromQuery] int fromMemberId, [FromQuery] int toMemberId) => Run(async (userId, ct) =>
     {

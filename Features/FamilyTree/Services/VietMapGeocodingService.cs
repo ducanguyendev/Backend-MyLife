@@ -14,50 +14,52 @@ public sealed class VietMapGeocodingService(
     NominatimGeocodingService fallback,
     ILogger<VietMapGeocodingService> logger) : IGeocodingService
 {
+    private static int missingKeyWarningLogged;
+
     public async Task<GeocodingResult?> GeocodeAsync(string address, CancellationToken cancellationToken)
     {
         var settings = options.Value;
         var apiKey = configuration["VietMap:ApiKey"];
-        if (string.IsNullOrWhiteSpace(apiKey))
-            apiKey = Environment.GetEnvironmentVariable("VIETMAP_API_KEY");
+        if (string.IsNullOrWhiteSpace(apiKey)) apiKey = Environment.GetEnvironmentVariable("VIETMAP_API_KEY");
         if (!settings.Enabled) return null;
+
+        var normalized = FamilyAddressNormalizer.Normalize(address);
+        if (normalized is null) return null;
+        var fingerprint = Fingerprint(normalized);
         if (!settings.VietMapEnabled || string.IsNullOrWhiteSpace(apiKey))
         {
-            if (settings.VietMapEnabled && string.IsNullOrWhiteSpace(apiKey))
-                logger.LogWarning("VIETMAP geocoding is enabled but VietMap:ApiKey is not configured; using fallback provider.");
-            return await fallback.GeocodeAsync(address, cancellationToken);
+            if (settings.VietMapEnabled && Interlocked.Exchange(ref missingKeyWarningLogged, 1) == 0)
+                logger.LogWarning("VIETMAP API key is not configured; using Nominatim fallback.");
+            return await UseFallbackAsync(normalized, fingerprint, "", 0, "", "VIETMAP_DISABLED", cancellationToken);
         }
 
+        var searchStatus = "";
+        var candidateCount = 0;
+        var placeStatus = "";
+        var baseUrl = settings.VietMapBaseUrl.TrimEnd('/');
         try
         {
-            var normalized = FamilyAddressNormalizer.Normalize(address);
-            if (normalized is null) return null;
-            var baseUrl = settings.VietMapBaseUrl.TrimEnd('/');
-            var searchUri = new UriBuilder($"{baseUrl}/api/autocomplete/v4")
+            var searchUri = new UriBuilder($"{baseUrl}/api/search/v4")
             {
-                Query = $"apikey={Uri.EscapeDataString(apiKey)}&text={Uri.EscapeDataString(normalized)}&display_type={Math.Clamp(settings.VietMapDisplayType, 1, 6)}",
+                Query = $"apikey={Uri.EscapeDataString(apiKey)}&text={Uri.EscapeDataString(normalized)}&display_type=5",
             }.Uri;
             using var searchResponse = await clients.CreateClient(nameof(VietMapGeocodingService))
                 .GetAsync(searchUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            logger.LogDebug("VIETMAP autocomplete returned HTTP {StatusCode} for address fingerprint {AddressFingerprint}.",
-                (int)searchResponse.StatusCode, Fingerprint(normalized));
+            searchStatus = ((int)searchResponse.StatusCode).ToString(CultureInfo.InvariantCulture);
             if (!searchResponse.IsSuccessStatusCode)
-            {
-                if (searchResponse.StatusCode == HttpStatusCode.Unauthorized)
-                    logger.LogWarning("VIETMAP rejected the configured API key; using fallback provider.");
-                return await fallback.GeocodeAsync(normalized, cancellationToken);
-            }
+                return await UseFallbackAsync(normalized, fingerprint, searchStatus, 0, "", StatusReason(searchResponse.StatusCode), cancellationToken);
 
             await using var searchStream = await searchResponse.Content.ReadAsStreamAsync(cancellationToken);
             using var searchDocument = await JsonDocument.ParseAsync(searchStream, cancellationToken: cancellationToken);
             if (searchDocument.RootElement.ValueKind != JsonValueKind.Array)
-                return await fallback.GeocodeAsync(normalized, cancellationToken);
+                return await UseFallbackAsync(normalized, fingerprint, searchStatus, 0, "", "VIETMAP_EMPTY", cancellationToken);
 
-            var firstCandidate = searchDocument.RootElement.EnumerateArray()
-                .FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(ReadString(candidate, "ref_id")));
-            var referenceId = ReadString(firstCandidate, "ref_id");
-            if (string.IsNullOrWhiteSpace(referenceId))
-                return await fallback.GeocodeAsync(normalized, cancellationToken);
+            var candidates = searchDocument.RootElement.EnumerateArray().ToArray();
+            candidateCount = candidates.Length;
+            var referenceId = candidates.Select(candidate => ReadString(candidate, "ref_id"))
+                .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+            if (referenceId is null)
+                return await UseFallbackAsync(normalized, fingerprint, searchStatus, candidateCount, "", "VIETMAP_EMPTY", cancellationToken);
 
             var placeUri = new UriBuilder($"{baseUrl}/api/place/v4")
             {
@@ -65,10 +67,9 @@ public sealed class VietMapGeocodingService(
             }.Uri;
             using var placeResponse = await clients.CreateClient(nameof(VietMapGeocodingService))
                 .GetAsync(placeUri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            logger.LogDebug("VIETMAP place returned HTTP {StatusCode} for address fingerprint {AddressFingerprint}.",
-                (int)placeResponse.StatusCode, Fingerprint(normalized));
+            placeStatus = ((int)placeResponse.StatusCode).ToString(CultureInfo.InvariantCulture);
             if (!placeResponse.IsSuccessStatusCode)
-                return await fallback.GeocodeAsync(normalized, cancellationToken);
+                return await UseFallbackAsync(normalized, fingerprint, searchStatus, candidateCount, placeStatus, StatusReason(placeResponse.StatusCode), cancellationToken);
 
             await using var placeStream = await placeResponse.Content.ReadAsStreamAsync(cancellationToken);
             using var placeDocument = await JsonDocument.ParseAsync(placeStream, cancellationToken: cancellationToken);
@@ -76,17 +77,46 @@ public sealed class VietMapGeocodingService(
             if (!TryCoordinate(place, "lat", -90, 90, out var latitude) ||
                 !TryCoordinate(place, "lng", -180, 180, out var longitude) ||
                 string.IsNullOrWhiteSpace(ReadString(place, "display")))
-                return await fallback.GeocodeAsync(normalized, cancellationToken);
+                return await UseFallbackAsync(normalized, fingerprint, searchStatus, candidateCount, placeStatus, "VIETMAP_INVALID_PLACE", cancellationToken);
 
-            return new GeocodingResult(latitude, longitude, ReadString(place, "display")!.Trim());
+            var result = new GeocodingResult(latitude, longitude, ReadString(place, "display")!.Trim());
+            LogAttempt(fingerprint, searchStatus, candidateCount, placeStatus, "Success", "");
+            return result;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or UriFormatException or InvalidOperationException)
         {
-            logger.LogWarning("VIETMAP geocoding failed with {ErrorType}; using fallback provider.", ex.GetType().Name);
-            return await fallback.GeocodeAsync(address, cancellationToken);
+            var reason = ex switch
+            {
+                TaskCanceledException => "VIETMAP_TIMEOUT",
+                HttpRequestException => "VIETMAP_NETWORK_ERROR",
+                JsonException when placeStatus.Length > 0 => "VIETMAP_INVALID_PLACE",
+                _ => "VIETMAP_EMPTY",
+            };
+            return await UseFallbackAsync(normalized, fingerprint, searchStatus, candidateCount, placeStatus, reason, cancellationToken);
         }
     }
+
+    private async Task<GeocodingResult?> UseFallbackAsync(string address, string fingerprint, string searchStatus,
+        int candidateCount, string placeStatus, string reason, CancellationToken cancellationToken)
+    {
+        var result = await fallback.GeocodeAsync(address, cancellationToken);
+        var outcome = result is not null ? "Fallback" : reason == "VIETMAP_EMPTY" ? "Empty" : "Error";
+        LogAttempt(fingerprint, searchStatus, candidateCount, placeStatus, outcome, reason);
+        return result;
+    }
+
+    private void LogAttempt(string fingerprint, string searchStatus, int candidateCount, string placeStatus, string result, string reason) =>
+        logger.LogInformation("Geocoding attempt Provider=VietMap AddressFingerprint={AddressFingerprint} SearchStatus={SearchStatus} CandidateCount={CandidateCount} PlaceStatus={PlaceStatus} Result={Result} FallbackReason={FallbackReason}.",
+            fingerprint, searchStatus, candidateCount, placeStatus, result, reason);
+
+    private static string StatusReason(HttpStatusCode status) => status switch
+    {
+        HttpStatusCode.Unauthorized => "VIETMAP_401",
+        HttpStatusCode.Locked => "VIETMAP_423",
+        >= HttpStatusCode.InternalServerError => "VIETMAP_5XX",
+        _ => "VIETMAP_ERROR",
+    };
 
     private static string Fingerprint(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value.ToUpperInvariant())))[..12];
