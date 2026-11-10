@@ -39,7 +39,16 @@ builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
         if (context.HttpContext.Request.Method == "POST" &&
             context.HttpContext.Request.Path.Equals("/api/auth/register", StringComparison.OrdinalIgnoreCase))
         {
-            string Attempted(string key) => context.ModelState.TryGetValue(key, out var entry) ? entry.AttemptedValue ?? string.Empty : string.Empty;
+            // JSON input formatters do not populate ModelState.AttemptedValue.
+            var registration = (context as Microsoft.AspNetCore.Mvc.Filters.ActionExecutingContext)?
+                .ActionArguments.Values.OfType<MyLife.Features.Auth.Models.RegisterViewModel>().FirstOrDefault();
+            string Attempted(string key) => key switch
+            {
+                "Email" => registration?.Email ?? string.Empty,
+                "Password" => registration?.Password ?? string.Empty,
+                "ConfirmPassword" => registration?.ConfirmPassword ?? string.Empty,
+                _ => string.Empty
+            };
             string? code = null;
             string? codedMessage = null;
             if (!string.IsNullOrWhiteSpace(Attempted("ConfirmPassword")) &&
@@ -57,7 +66,9 @@ builder.Services.AddControllers().ConfigureApiBehaviorOptions(options =>
             {
                 code = "AUTH_GMAIL_REQUIRED"; codedMessage = "Only Gmail addresses are supported.";
             }
-            else if (context.ModelState.TryGetValue("DateOfBirth", out var dob) && dob.Errors.Count > 0)
+            else if (context.ModelState.Any(entry => entry.Value?.Errors.Count > 0 &&
+                (entry.Key.Equals("DateOfBirth", StringComparison.OrdinalIgnoreCase) ||
+                 entry.Key.EndsWith(".DateOfBirth", StringComparison.OrdinalIgnoreCase))))
             {
                 code = "AUTH_DOB_INVALID"; codedMessage = "Date of birth is invalid.";
             }
@@ -206,10 +217,18 @@ builder.Services.AddAuthentication(options =>
         {
             var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
             var email = context.Principal?.FindFirstValue(ClaimTypes.Email);
+            var sessionId = context.Principal?.FindFirstValue("sid");
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                context.Fail("This session is unavailable.");
+                return;
+            }
+            var now = DateTime.UtcNow;
             var user = await db.Users.AsNoTracking().Where(x => x.Email == email)
-                .Select(x => new { x.Id, x.IsActive, Roles = x.UserRoles.Select(r => r.Role.Name).ToArray() })
+                .Select(x => new { x.Id, x.IsActive, Roles = x.UserRoles.Select(r => r.Role.Name).ToArray(),
+                    SessionActive = db.RefreshTokens.Any(r => r.UserId == x.Id && r.Token == sessionId && !r.IsRevoked && r.ExpiresAt > now) })
                 .SingleOrDefaultAsync(context.HttpContext.RequestAborted);
-            if (user is null || !user.IsActive)
+            if (user is null || !user.IsActive || !user.SessionActive)
             {
                 context.Fail("This account is unavailable.");
                 return;
@@ -287,18 +306,25 @@ app.UseCors("AllowReactApp");
 // Cross-origin browser calls must also originate from an explicitly trusted origin.
 app.Use(async (context, nextMiddleware) =>
 {
-    var unsafeMethod = context.Request.Method is not ("GET" or "HEAD" or "OPTIONS");
-    if (unsafeMethod)
+    var hasCookieSession = context.Request.Cookies.ContainsKey("AccessToken") || context.Request.Cookies.ContainsKey("RefreshToken");
+    var origin = context.Request.Headers.Origin.ToString();
+    var rejectionCode = AuthTransportPolicy.GetRequestRejectionCode(
+        context.Request.Method,
+        context.Request.Headers["X-Client-Platform"],
+        origin,
+        hasCookieSession,
+        context.Request.Headers["X-Requested-With"],
+        allowedOrigins);
+    if (rejectionCode is not null)
     {
-        var origin = context.Request.Headers.Origin.ToString();
-        var hasCookieSession = context.Request.Cookies.ContainsKey("AccessToken") || context.Request.Cookies.ContainsKey("RefreshToken");
-        if ((!string.IsNullOrEmpty(origin) && !allowedOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase)) ||
-            (hasCookieSession && context.Request.Headers["X-Requested-With"] != "MyLife"))
-        {
-            context.Response.StatusCode = StatusCodes.Status403Forbidden;
-            await context.Response.WriteAsJsonAsync(new { success = false, message = "The request origin could not be verified." });
-            return;
-        }
+        app.Logger.LogWarning("Rejected request by auth transport policy. Method={Method} Path={Path} Code={Code} OriginPresent={OriginPresent} HasCookieSession={HasCookieSession}",
+            context.Request.Method, context.Request.Path, rejectionCode, !string.IsNullOrEmpty(origin), hasCookieSession);
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        var message = rejectionCode == "MOBILE_COOKIE_SESSION_REJECTED"
+            ? "Mobile requests cannot authenticate with browser cookies."
+            : "The request origin could not be verified.";
+        await context.Response.WriteAsJsonAsync(new { success = false, code = rejectionCode, message });
+        return;
     }
     await nextMiddleware(context);
 });

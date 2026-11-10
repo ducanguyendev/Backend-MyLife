@@ -21,8 +21,10 @@ public sealed class FamilyTimelineService(AppDbContext db, IFamilyTreeService tr
             .Select(a => new FamilyTimelineEventDto(-a.Id, a.RelatedMemberId, a.RelatedMemberName, "ANNIVERSARY", a.Title,
                 a.Notes, a.OriginalSolarDate, a.OriginalSolarDate!.Value.Year, false, a.Place, null, null, null, "ANNIVERSARY", a.Id, true)));
         if (memberId.HasValue) items = items.Where(e => e.MemberId == memberId || e.RelatedMemberId == memberId);
-        return items.OrderBy(e => e.EventDate.HasValue ? 0 : e.EventYear.HasValue ? 1 : 2)
-            .ThenBy(e => e.EventDate?.DayNumber ?? e.EventYear ?? int.MaxValue).ThenBy(e => e.Id).ToArray();
+        // A year-only event belongs in that year, rather than after every dated event.
+        return items.OrderBy(e => e.EventDate?.Year ?? e.EventYear ?? int.MaxValue)
+            .ThenBy(e => e.EventDate?.DayNumber ?? (e.EventYear is int year ? new DateOnly(year, 1, 1).DayNumber : int.MaxValue))
+            .ThenBy(e => e.Id).ToArray();
     }
 
     public async Task<FamilyTimelineEventDto> CreateAsync(int userId, FamilyTimelineWriteDto dto, CancellationToken ct)

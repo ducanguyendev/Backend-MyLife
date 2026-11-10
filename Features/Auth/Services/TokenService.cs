@@ -8,20 +8,21 @@ namespace MyLife.Features.Auth.Services;
 
 public interface ITokenService
 {
-    string GenerateAccessToken(string email, string role = "USER");
+    string GenerateAccessToken(string email, string role, string sessionId);
     string GenerateRefreshToken();
     ClaimsPrincipal? GetPrincipalFromExpiredToken(string token);
 }
 
 public sealed class TokenService(IConfiguration configuration) : ITokenService
 {
-    public string GenerateAccessToken(string email, string role = "USER")
+    public string GenerateAccessToken(string email, string role, string sessionId)
     {
         var claims = new[]
         {
             new Claim(JwtRegisteredClaimNames.Sub, email),
             new Claim(JwtRegisteredClaimNames.Email, email),
             new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new Claim("sid", sessionId),
             new Claim(ClaimTypes.Email, email),
             new Claim(ClaimTypes.Role, role)
         };

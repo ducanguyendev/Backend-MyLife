@@ -546,8 +546,17 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         var grandfather = await Create(owner.Token, "Grandfather", new() { ["gender"] = "Nam", ["generation"] = 1 });
         var father = await Create(owner.Token, "Father", new() { ["gender"] = "Nam", ["generation"] = 2, ["fatherId"] = grandfather });
         var uncle = await Create(owner.Token, "Uncle", new() { ["gender"] = "Nam", ["generation"] = 2, ["fatherId"] = grandfather });
-        var user = await Create(owner.Token, "User", new() { ["gender"] = "Nữ", ["generation"] = 3, ["fatherId"] = father, ["dateOfBirth"] = "1990-01-01" });
+        var aunt = await Create(owner.Token, "Aunt", new() { ["gender"] = "Nữ", ["generation"] = 2, ["fatherId"] = grandfather });
+        var maternalGrandfather = await Create(owner.Token, "Maternal grandfather", new() { ["gender"] = "Nam", ["generation"] = 1 });
+        var mother = await Create(owner.Token, "Mother", new() { ["gender"] = "Nữ", ["generation"] = 2, ["fatherId"] = maternalGrandfather });
+        var maternalUncle = await Create(owner.Token, "Maternal uncle", new() { ["gender"] = "Nam", ["generation"] = 2, ["fatherId"] = maternalGrandfather });
+        var user = await Create(owner.Token, "User", new() { ["gender"] = "Nữ", ["generation"] = 3, ["fatherId"] = father, ["motherId"] = mother, ["dateOfBirth"] = "1990-01-01" });
         var sibling = await Create(owner.Token, "Older sister", new() { ["gender"] = "Nữ", ["generation"] = 3, ["fatherId"] = father, ["dateOfBirth"] = "1988-01-01" });
+        var child = await Create(owner.Token, "Son", new() { ["gender"] = "Nam", ["generation"] = 4, ["fatherId"] = user });
+        var granddaughter = await Create(owner.Token, "Granddaughter", new() { ["gender"] = "Nữ", ["generation"] = 5, ["fatherId"] = child });
+        var grandson = await Create(owner.Token, "Grandson", new() { ["gender"] = "Nam", ["generation"] = 5, ["fatherId"] = child });
+        var nephew = await Create(owner.Token, "Nephew", new() { ["gender"] = "Nam", ["generation"] = 4, ["fatherId"] = sibling });
+        var niece = await Create(owner.Token, "Niece", new() { ["gender"] = "Nữ", ["generation"] = 4, ["fatherId"] = sibling });
         var cousin = await Create(owner.Token, "Cousin", new() { ["gender"] = "Nam", ["generation"] = 3, ["fatherId"] = uncle });
         var unrelated = await Create(owner.Token, "Unrelated", new() { ["generation"] = 1 });
         await Create(outsider.Token, "Foreign member");
@@ -564,6 +573,15 @@ public sealed class FamilyIsolationTests(MyLifeFactory factory) : IClassFixture<
         Assert.Equal("OLDER_SISTER", (await Relation(user, sibling)).GetProperty("relationshipCode").GetString());
         Assert.Equal("GRANDFATHER", (await Relation(user, grandfather)).GetProperty("relationshipCode").GetString());
         Assert.Equal("PATERNAL_UNCLE", (await Relation(user, uncle)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("PATERNAL_AUNT", (await Relation(user, aunt)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("NIECE", (await Relation(aunt, user)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("GRANDDAUGHTER", (await Relation(user, granddaughter)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("GRANDMOTHER", (await Relation(granddaughter, user)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("GRANDSON", (await Relation(user, grandson)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("GRANDMOTHER", (await Relation(grandson, user)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("NEPHEW", (await Relation(user, nephew)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("NIECE", (await Relation(user, niece)).GetProperty("relationshipCode").GetString());
+        Assert.Equal("MATERNAL_UNCLE", (await Relation(user, maternalUncle)).GetProperty("relationshipCode").GetString());
         Assert.Equal("COUSIN", (await Relation(user, cousin)).GetProperty("relationshipCode").GetString());
         Assert.Equal("UNKNOWN", (await Relation(user, unrelated)).GetProperty("relationshipCode").GetString());
 

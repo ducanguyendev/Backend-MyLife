@@ -38,9 +38,13 @@ public sealed class LibraryCategoryMigrationTests
             await using var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseNpgsql(builder.ConnectionString).Options);
             var migrator = db.GetService<IMigrator>();
             await migrator.MigrateAsync("20261006063103_ExtendLibraryPhotoMetadata");
-            var user = new User { Email = schema + "@example.com", FullName = "Legacy owner", PasswordHash = "test-only", IsActive = true };
-            db.Users.Add(user); await db.SaveChangesAsync();
-            var album = new LibraryAlbum { Name = "Existing album", CreatedByUserId = user.Id, DriveFolderId = "existing-folder" };
+            // Insert using the historical schema; today's User model includes display_name.
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO users (email, full_name, password_hash, auth_provider, is_active, has_local_provider, has_google_provider, created_at, updated_at)
+                VALUES ({schema + "@example.com"}, 'Legacy owner', 'test-only', 0, true, true, false, now(), now());
+                """);
+            var userId = await db.Database.SqlQuery<int>($"SELECT id AS \"Value\" FROM users WHERE email = {schema + "@example.com"}").SingleAsync();
+            var album = new LibraryAlbum { Name = "Existing album", CreatedByUserId = userId, DriveFolderId = "existing-folder" };
             db.LibraryAlbums.Add(album); await db.SaveChangesAsync();
             var photo = new LibraryPhoto { AlbumId = album.Id, DriveFileId = "existing-drive-file", Url = "https://lh3.googleusercontent.com/d/existing-drive-file",
                 FileName = "existing.jpg", ContentType = "image/jpeg", FileSize = 123, Category = "decrees", Title = "Existing photo", CreatedAt = DateTime.UtcNow };

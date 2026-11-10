@@ -159,8 +159,9 @@ public sealed class AccountController : ControllerBase
     [HttpPost("refresh-token")]
     public async Task<IActionResult> RefreshToken([FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] RefreshTokenRequest? request)
     {
-        var access = Request.Cookies["AccessToken"] ?? request?.AccessToken;
-        var rawRefresh = Request.Cookies["RefreshToken"] ?? request?.RefreshToken;
+        var nativeClient = IsNativeTokenClient();
+        var access = nativeClient ? request?.AccessToken : Request.Cookies["AccessToken"] ?? request?.AccessToken;
+        var rawRefresh = nativeClient ? request?.RefreshToken : Request.Cookies["RefreshToken"] ?? request?.RefreshToken;
         if (string.IsNullOrWhiteSpace(rawRefresh)) return Unauthorized(Error("A valid session is required."));
         var email = string.IsNullOrWhiteSpace(access) ? null : _tokens.GetPrincipalFromExpiredToken(access)?.FindFirstValue(ClaimTypes.Email);
         if (!string.IsNullOrWhiteSpace(access) && string.IsNullOrWhiteSpace(email)) return Unauthorized(Error("A valid session is required."));
@@ -188,13 +189,15 @@ public sealed class AccountController : ControllerBase
     [HttpPost("logout")]
     public async Task<IActionResult> Logout([FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] RefreshTokenRequest? request)
     {
-        var rawRefresh = Request.Cookies["RefreshToken"] ?? request?.RefreshToken;
+        var nativeClient = IsNativeTokenClient();
+        var rawRefresh = nativeClient ? request?.RefreshToken : Request.Cookies["RefreshToken"] ?? request?.RefreshToken;
         if (!string.IsNullOrWhiteSpace(rawRefresh))
         {
             var stored = await _db.RefreshTokens.SingleOrDefaultAsync(x => x.Token == HashRefreshToken(rawRefresh));
             if (stored is not null && !stored.IsRevoked) { stored.IsRevoked = true; await _db.SaveChangesAsync(); }
         }
-        DeleteAuthCookies(); return Ok(new { success = true, message = "Signed out." });
+        if (!nativeClient) DeleteAuthCookies();
+        return Ok(new { success = true, message = "Signed out." });
     }
 
     [Authorize(Roles = AppRoles.Admin)]
@@ -278,14 +281,19 @@ public sealed class AccountController : ControllerBase
     private async Task<object> CreateSessionResponseAsync(AppUser user) { var refresh = _tokens.GenerateRefreshToken(); _db.RefreshTokens.Add(NewRefreshToken(user.Id, refresh)); await _db.SaveChangesAsync(); return CreateSessionResponse(user, refresh); }
     private object CreateSessionResponse(AppUser user, string refresh)
     {
-        var access = _tokens.GenerateAccessToken(user.Email, PrimaryRole(user));
-        SetAuthCookies(access, refresh);
+        var access = _tokens.GenerateAccessToken(user.Email, PrimaryRole(user), HashRefreshToken(refresh));
+        var nativeClient = IsNativeTokenClient();
+        if (!nativeClient)
+            SetAuthCookies(access, refresh);
         var metadata = new { success = true, message = "Authenticated.", user = ToUserDto(user), accessTokenExpiresIn = AccessSeconds, refreshTokenExpiresIn = RefreshMinutes * 60 };
         // Only native clients explicitly opt into body tokens; browsers use HttpOnly cookies exclusively.
-        return Request.Headers["X-Client-Platform"] == "mobile"
+        return nativeClient
             ? new { metadata.success, metadata.message, metadata.user, accessToken = access, refreshToken = refresh, metadata.accessTokenExpiresIn, metadata.refreshTokenExpiresIn }
             : metadata;
     }
+    private bool IsNativeTokenClient() => AuthTransportPolicy.IsNativeTokenClient(
+        Request.Headers["X-Client-Platform"],
+        Request.Cookies.ContainsKey("AccessToken") || Request.Cookies.ContainsKey("RefreshToken"));
     private RefreshToken NewRefreshToken(int userId, string raw) => new() { UserId = userId, Token = HashRefreshToken(raw), IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString(), UserAgent = Request.Headers.UserAgent.ToString(), ExpiresAt = DateTime.UtcNow.AddMinutes(RefreshMinutes), CreatedAt = DateTime.UtcNow };
     private IQueryable<AppUser> UserWithRoles() => _db.Users.Include(x => x.UserRoles).ThenInclude(x => x.Role);
     private async Task<AppUser?> CurrentUserAsync() { var email = User.FindFirstValue(ClaimTypes.Email); return string.IsNullOrWhiteSpace(email) ? null : await UserWithRoles().SingleOrDefaultAsync(x => x.Email == email); }

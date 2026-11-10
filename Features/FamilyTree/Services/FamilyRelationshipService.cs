@@ -101,8 +101,30 @@ public sealed class FamilyRelationshipService(AppDbContext db, IFamilyTreeServic
         if (edges.All(e => e == "CHILD")) return edges.Length == 2 ? Gender(target) switch { "M" => ("GRANDSON", "Grandson"), "F" => ("GRANDDAUGHTER", "Granddaughter"), _ => ("DESCENDANT", "Descendant") } : ("DESCENDANT", "Descendant");
         if (edges.Length == 2 && edges[0] == "PARENT" && edges[1] == "SIBLING")
         {
-            var side = Gender(target) == "M" ? (nodes[0].MotherId == nodes[1].Id ? "MATERNAL_UNCLE" : "PATERNAL_UNCLE") : "AUNT";
-            return side switch { "MATERNAL_UNCLE" => (side, "Maternal uncle"), "PATERNAL_UNCLE" => (side, "Paternal uncle"), _ => ("AUNT", "Aunt") };
+            var throughMother = nodes[0].MotherId == nodes[1].Id;
+            var throughFather = nodes[0].FatherId == nodes[1].Id;
+            var lineage = throughMother == throughFather ? null : throughMother ? "MATERNAL" : "PATERNAL";
+            var gender = Gender(target);
+            var side = (lineage, gender) switch
+            {
+                ("MATERNAL", "M") => "MATERNAL_UNCLE",
+                ("PATERNAL", "M") => "PATERNAL_UNCLE",
+                ("MATERNAL", "F") => "MATERNAL_AUNT",
+                ("PATERNAL", "F") => "PATERNAL_AUNT",
+                _ when gender == "F" => "AUNT",
+                _ when gender == "M" => "UNCLE",
+                _ => "RELATED"
+            };
+            return side switch
+            {
+                "MATERNAL_UNCLE" => (side, "Maternal uncle"),
+                "PATERNAL_UNCLE" => (side, "Paternal uncle"),
+                "MATERNAL_AUNT" => (side, "Maternal aunt"),
+                "PATERNAL_AUNT" => (side, "Paternal aunt"),
+                "AUNT" => (side, "Aunt"),
+                "UNCLE" => (side, "Uncle"),
+                _ => ("RELATED", "Relative")
+            };
         }
         if (edges.Length == 2 && edges[0] == "SIBLING" && edges[1] == "CHILD")
             return Gender(target) switch { "M" => ("NEPHEW", "Nephew"), "F" => ("NIECE", "Niece"), _ => ("RELATED", "Relative") };

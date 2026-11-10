@@ -171,7 +171,7 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
     public async Task Google_creation_derives_display_name_and_relogin_preserves_custom_name()
     {
         var email = $"google-display.{Guid.NewGuid():N}@gmail.com";
-        const string subject = "display-name-google-subject";
+        var subject = $"display-name-google-subject-{Guid.NewGuid():N}";
         const string googleName = "Nguyễn Huỳnh Minh Đức";
         var googleToken = $"test|{email}|{subject}|picture|{googleName}";
 
@@ -249,8 +249,12 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
         var fresh = await Login(email, password);
         Assert.Equal(HttpStatusCode.OK, (await Put($"/api/admin/users/{targetId}/role", new { role = "ADMIN" }, admin.AccessToken)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await Put($"/api/admin/users/{targetId}/role", new { role = "ADMIN" }, admin.AccessToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Get("/api/admin/stats", fresh.AccessToken)).StatusCode);
+        fresh = await Login(email, password);
         Assert.Equal(HttpStatusCode.OK, (await Get("/api/admin/stats", fresh.AccessToken)).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await Put($"/api/admin/users/{targetId}/role", new { role = "USER" }, admin.AccessToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Get("/api/admin/stats", fresh.AccessToken)).StatusCode);
+        fresh = await Login(email, password);
         Assert.Equal(HttpStatusCode.Forbidden, (await Get("/api/admin/stats", fresh.AccessToken)).StatusCode);
 
         await VerifyFamilyTree(fresh.AccessToken);
@@ -375,11 +379,111 @@ public sealed class SystemFlowsTests(MyLifeFactory factory) : IClassFixture<MyLi
         Assert.Contains(login.Headers.GetValues("Set-Cookie"), value => value.StartsWith("AccessToken=") && value.Contains("httponly", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(login.Headers.GetValues("Set-Cookie"), value => value.StartsWith("RefreshToken=") && value.Contains("httponly", StringComparison.OrdinalIgnoreCase));
         Assert.Equal(HttpStatusCode.OK, (await web.GetAsync("/api/me")).StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden, (await web.PostAsync("/api/logout", null)).StatusCode);
+        using var csrfBlocked = await web.PostAsync("/api/logout", null);
+        Assert.Equal(HttpStatusCode.Forbidden, csrfBlocked.StatusCode);
+        Assert.Equal("CSRF_HEADER_REQUIRED", (await Body(csrfBlocked)).GetProperty("code").GetString());
+        using var spoofedMobile = new HttpRequestMessage(HttpMethod.Post, "/api/logout");
+        spoofedMobile.Headers.Add("X-Client-Platform", "mobile");
+        spoofedMobile.Headers.Add("X-Requested-With", "MyLife");
+        using var spoofedResponse = await web.SendAsync(spoofedMobile);
+        Assert.Equal(HttpStatusCode.Forbidden, spoofedResponse.StatusCode);
+        Assert.Equal("MOBILE_COOKIE_SESSION_REJECTED", (await Body(spoofedResponse)).GetProperty("code").GetString());
         using var logout = new HttpRequestMessage(HttpMethod.Post, "/api/logout");
         logout.Headers.Add("X-Requested-With", "MyLife");
         Assert.Equal(HttpStatusCode.OK, (await web.SendAsync(logout)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await web.GetAsync("/api/me")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Native_session_uses_body_tokens_and_never_uses_browser_cookies()
+    {
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = false, AllowAutoRedirect = false });
+        using var invalidOrigin = new HttpRequestMessage(HttpMethod.Post, "/api/auth/register")
+        {
+            Content = JsonContent.Create(new { })
+        };
+        invalidOrigin.Headers.Add("X-Client-Platform", "mobile");
+        invalidOrigin.Headers.Add("Origin", "http://localhost:8081");
+        using var rejectedOrigin = await client.SendAsync(invalidOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, rejectedOrigin.StatusCode);
+        Assert.Equal("REQUEST_ORIGIN_REJECTED", (await Body(rejectedOrigin)).GetProperty("code").GetString());
+
+        var suffix = Guid.NewGuid().ToString("N")[..10];
+        var email = $"native.{suffix}@gmail.com";
+        const string password = "Native_Test!234567";
+        using var registration = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            fullName = "Native User", phoneNumber = "0912345678", gender = "Nam",
+            dateOfBirth = "1997-04-15", email, password, confirmPassword = password
+        });
+        Assert.Equal(HttpStatusCode.Created, registration.StatusCode);
+
+        using var loginRequest = new HttpRequestMessage(HttpMethod.Post, "/api/login")
+        {
+            Content = JsonContent.Create(new { email, password, rememberMe = true })
+        };
+        loginRequest.Headers.Add("X-Client-Platform", "mobile");
+        using var login = await client.SendAsync(loginRequest);
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        Assert.False(login.Headers.Contains("Set-Cookie"));
+        var loginBody = await Body(login);
+        var session = ParseSession(loginBody);
+        Assert.Equal("USER", loginBody.GetProperty("user").GetProperty("role").GetString());
+
+        using var me = new HttpRequestMessage(HttpMethod.Get, "/api/me");
+        me.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session.AccessToken);
+        me.Headers.Add("X-Client-Platform", "mobile");
+        using var meResponse = await client.SendAsync(me);
+        Assert.Equal(HttpStatusCode.OK, meResponse.StatusCode);
+
+        using var refreshRequest = new HttpRequestMessage(HttpMethod.Post, "/api/refresh-token")
+        {
+            Content = JsonContent.Create(new { accessToken = session.AccessToken, refreshToken = session.RefreshToken })
+        };
+        refreshRequest.Headers.Add("X-Client-Platform", "mobile");
+        using var refresh = await client.SendAsync(refreshRequest);
+        Assert.Equal(HttpStatusCode.OK, refresh.StatusCode);
+        Assert.False(refresh.Headers.Contains("Set-Cookie"));
+        var rotatedSession = ParseSession(await Body(refresh));
+
+        using var logoutRequest = new HttpRequestMessage(HttpMethod.Post, "/api/logout")
+        {
+            Content = JsonContent.Create(new { accessToken = rotatedSession.AccessToken, refreshToken = rotatedSession.RefreshToken })
+        };
+        logoutRequest.Headers.Add("X-Client-Platform", "mobile");
+        using var logout = await client.SendAsync(logoutRequest);
+        Assert.Equal(HttpStatusCode.OK, logout.StatusCode);
+        Assert.False(logout.Headers.Contains("Set-Cookie"));
+        using var expiredMeRequest = new HttpRequestMessage(HttpMethod.Get, "/api/me");
+        expiredMeRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", rotatedSession.AccessToken);
+        using var expiredMe = await client.SendAsync(expiredMeRequest);
+        Assert.Equal(HttpStatusCode.Unauthorized, expiredMe.StatusCode);
+    }
+
+    [Fact]
+    public async Task Mobile_header_does_not_bypass_browser_cookie_csrf_protection()
+    {
+        using var web = factory.CreateClient(new WebApplicationFactoryClientOptions { HandleCookies = true, AllowAutoRedirect = false });
+        var suffix = Guid.NewGuid().ToString("N")[..10];
+        var email = $"mobile-cookie.{suffix}@gmail.com";
+        const string password = "Web_Test!234567";
+        using var registration = await web.PostAsJsonAsync("/api/auth/register", new
+        {
+            fullName = "Cookie User", phoneNumber = "0912345678", gender = "Nam",
+            dateOfBirth = "1997-04-15", email, password, confirmPassword = password
+        });
+        Assert.Equal(HttpStatusCode.Created, registration.StatusCode);
+        using var login = await web.PostAsJsonAsync("/api/login", new { email, password, rememberMe = true });
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+
+        using var spoofedMobile = new HttpRequestMessage(HttpMethod.Post, "/api/logout");
+        spoofedMobile.Headers.Add("X-Client-Platform", "mobile");
+        spoofedMobile.Headers.Add("X-Requested-With", "MyLife");
+        using var response = await web.SendAsync(spoofedMobile);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        var body = await Body(response);
+        Assert.Equal("MOBILE_COOKIE_SESSION_REJECTED", body.GetProperty("code").GetString());
+        Assert.Equal(HttpStatusCode.OK, (await web.GetAsync("/api/me")).StatusCode);
     }
 
     private async Task VerifyFamilyTree(string token)

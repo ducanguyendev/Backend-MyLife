@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
 
 namespace MyLife.Shared.Data;
@@ -43,8 +45,12 @@ public static class DatabaseStartup
             // in the pre-migration legacy baseline.
             if (columns.Keys.Any(x => x.Table is "library_albums" or "library_photos" or "library_categories" or "family_trees"))
                 throw new InvalidOperationException("Library tables exist without migration history; review the legacy schema manually.");
-            var entities = db.Model.GetEntityTypes()
-                .Where(e => e.GetTableName() is not ("library_albums" or "library_photos" or "library_categories" or "family_trees")).ToList();
+            // Validate the historical schema we are baselining, not today's model.
+            // Later migrations introduce additional tables and columns.
+            var migrations = db.GetService<IMigrationsAssembly>();
+            var baseline = migrations.CreateMigration(migrations.Migrations["20260921072914_AddFamilyRelationships"],
+                db.Database.ProviderName!).TargetModel;
+            var entities = baseline.GetEntityTypes().ToList();
             if (!entities.Any(e => columns.Keys.Any(x => x.Table == e.GetTableName()))) return;
             if (!configuration.GetValue<bool>("Database:AllowLegacyBaseline"))
                 throw new InvalidOperationException("A legacy database without migration history was detected. Back up the database and explicitly enable Database:AllowLegacyBaseline for this upgrade.");
