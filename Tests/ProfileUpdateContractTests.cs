@@ -43,4 +43,20 @@ public sealed class ProfileUpdateContractTests
         Validator.TryValidateObject(model, new ValidationContext(model), results, validateAllProperties: true);
         return results;
     }
+
+    [Theory]
+    [InlineData("invalid", "Nam", 1995)]
+    [InlineData("0123456789", "Nam", 1995)]
+    [InlineData("0|12345678", "Nam", 1995)]
+    [InlineData("0912345678", "male", 1995)]
+    [InlineData("0912345678", "Nam", 2999)]
+    public void Profile_update_rejects_invalid_mobile_gender_or_future_date(string phone, string gender, int year)
+    {
+        var model = new UpdateProfileViewModel
+        {
+            DisplayName = "Synthetic", PhoneNumber = phone, Gender = gender,
+            DateOfBirth = new DateOnly(year, 1, 1)
+        };
+        Assert.NotEmpty(ValidationErrors(model));
+    }
 }

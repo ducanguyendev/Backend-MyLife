@@ -273,8 +273,7 @@ app.UseExceptionHandler(errorApp => errorApp.Run(async context =>
     var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("UnhandledException");
     var exception = context.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
     logger.LogError("Unhandled exception ErrorType={ErrorType} Method={Method} Path={Path}", exception?.GetType().Name, context.Request.Method, context.Request.Path);
-    var databaseConflict = exception is Npgsql.PostgresException { SqlState: "40001" or "40P01" or "23505" or "23503" or "23001" }
-        || exception is DbUpdateException { InnerException: Npgsql.PostgresException { SqlState: "40001" or "40P01" or "23505" or "23503" or "23001" } };
+    var databaseConflict = DatabaseConflict.IsConflict(exception);
     context.Response.StatusCode = databaseConflict ? StatusCodes.Status409Conflict : StatusCodes.Status500InternalServerError;
     await context.Response.WriteAsJsonAsync(new { success = false, message = databaseConflict ? "The request conflicted with another change. Please retry." : "An unexpected server error occurred." });
 }));

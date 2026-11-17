@@ -223,12 +223,16 @@ public sealed class AccountController : ControllerBase
     [HttpPut("admin/users/{id:int}/status")]
     public async Task<IActionResult> SetUserStatus(int id, [FromBody] UpdateUserStatusRequest request)
     {
+        await using var transaction = await _db.Database.BeginTransactionAsync();
+        // Share the role-operation lock so a concurrent promotion cannot cross the admin guard.
+        await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(741003002);");
+        if (!await CurrentAdminSessionActiveAsync()) return Unauthorized(Error("Session is invalid."));
         var user = await UserWithRoles().SingleOrDefaultAsync(x => x.Id == id);
         if (user is null) return NotFound(Error("User not found."));
         if (PrimaryRole(user) == AppRoles.Admin) return BadRequest(Error("Administrator accounts cannot be locked."));
         user.IsActive = request.IsActive!.Value; user.UpdatedAt = DateTime.UtcNow;
         if (!user.IsActive) await _db.RefreshTokens.Where(x => x.UserId == id && !x.IsRevoked).ExecuteUpdateAsync(x => x.SetProperty(t => t.IsRevoked, true));
-        await _db.SaveChangesAsync(); return Ok(new { success = true, isActive = user.IsActive });
+        await _db.SaveChangesAsync(); await transaction.CommitAsync(); return Ok(new { success = true, isActive = user.IsActive });
     }
 
     [Authorize(Roles = AppRoles.Admin)]
@@ -239,6 +243,7 @@ public sealed class AccountController : ControllerBase
         await using var transaction = await _db.Database.BeginTransactionAsync();
         // Serialize demotions so concurrent administrators cannot remove the last active admin.
         await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(741003002);");
+        if (!await CurrentAdminSessionActiveAsync()) return Unauthorized(Error("Session is invalid."));
         var user = await UserWithRoles().SingleOrDefaultAsync(x => x.Id == id); var role = await _db.Roles.SingleOrDefaultAsync(x => x.Name == name);
         if (user is null || role is null) return NotFound(Error("User or role not found."));
         if (PrimaryRole(user) == AppRoles.Admin && name == AppRoles.User &&
@@ -261,9 +266,11 @@ public sealed class AccountController : ControllerBase
     [HttpDelete("admin/users/{id:int}")]
     public async Task<IActionResult> DeleteUser(int id)
     {
+        await using var transaction = await _db.Database.BeginTransactionAsync(HttpContext.RequestAborted);
+        await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(741003002);");
+        if (!await CurrentAdminSessionActiveAsync()) return Unauthorized(Error("Session is invalid."));
         var user = await UserWithRoles().SingleOrDefaultAsync(x => x.Id == id);
         if (user is null) return NotFound(Error("User not found.")); if (PrimaryRole(user) == AppRoles.Admin) return BadRequest(Error("Administrator accounts cannot be deleted."));
-        await using var transaction = await _db.Database.BeginTransactionAsync(HttpContext.RequestAborted);
         await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT id FROM users WHERE id = {id} FOR UPDATE", HttpContext.RequestAborted);
         var tree = (await _db.FamilyTrees.FromSqlInterpolated($"SELECT * FROM family_trees WHERE owner_user_id = {id} FOR UPDATE").ToListAsync(HttpContext.RequestAborted)).SingleOrDefault();
         if (tree is not null)
@@ -296,6 +303,17 @@ public sealed class AccountController : ControllerBase
         Request.Cookies.ContainsKey("AccessToken") || Request.Cookies.ContainsKey("RefreshToken"));
     private RefreshToken NewRefreshToken(int userId, string raw) => new() { UserId = userId, Token = HashRefreshToken(raw), IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString(), UserAgent = Request.Headers.UserAgent.ToString(), ExpiresAt = DateTime.UtcNow.AddMinutes(RefreshMinutes), CreatedAt = DateTime.UtcNow };
     private IQueryable<AppUser> UserWithRoles() => _db.Users.Include(x => x.UserRoles).ThenInclude(x => x.Role);
+    private Task<bool> CurrentAdminSessionActiveAsync()
+    {
+        var email = User.FindFirstValue(ClaimTypes.Email);
+        var session = User.FindFirstValue("sid");
+        var now = DateTime.UtcNow;
+        // Authorization may have happened before waiting for the administrator
+        // lock. Revalidate the caller after acquiring it, including revocation.
+        return _db.Users.AnyAsync(user => user.Email == email && user.IsActive
+            && user.UserRoles.Count == 1 && user.UserRoles.Any(role => role.Role.Name == AppRoles.Admin)
+            && _db.RefreshTokens.Any(token => token.UserId == user.Id && token.Token == session && !token.IsRevoked && token.ExpiresAt > now));
+    }
     private async Task<AppUser?> CurrentUserAsync() { var email = User.FindFirstValue(ClaimTypes.Email); return string.IsNullOrWhiteSpace(email) ? null : await UserWithRoles().SingleOrDefaultAsync(x => x.Email == email); }
     private async Task LogLoginAsync(AppUser? user, string email, string status) => await _db.LoginLogs.AddAsync(new LoginLog { User = user, AttemptEmail = email, Status = status, IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString(), CreatedAt = DateTime.UtcNow });
     private static string NormalizeEmail(string? value) => (value ?? string.Empty).Trim().ToLowerInvariant();
