@@ -288,8 +288,34 @@ public sealed class AccountController : ControllerBase
 
     [Authorize(Roles = AppRoles.Admin)]
     [HttpGet("admin/stats")]
-    public async Task<IActionResult> AdminStats() => Ok(new { totalUsers = await _db.Users.CountAsync(), totalActive = await _db.Users.CountAsync(x => x.IsActive), totalLocked = await _db.Users.CountAsync(x => !x.IsActive),
-        last7Days = new { successLogins = await _db.LoginLogs.CountAsync(x => x.Status == "SUCCESS" && x.CreatedAt >= DateTime.UtcNow.AddDays(-7)), failedLogins = await _db.LoginLogs.CountAsync(x => x.Status == "FAILED" && x.CreatedAt >= DateTime.UtcNow.AddDays(-7)), newRegistrations = await _db.Users.CountAsync(x => x.CreatedAt >= DateTime.UtcNow.AddDays(-7)) } });
+    public async Task<IActionResult> AdminStats()
+    {
+        var since = DateTime.UtcNow.AddDays(-7);
+        var ct = HttpContext.RequestAborted;
+        // Two aggregate queries instead of six sequential count round-trips.
+        // Do not parallelize commands on the shared request DbContext.
+        var users = await _db.Users.AsNoTracking().GroupBy(_ => 1)
+            .Select(group => new
+            {
+                Total = group.Count(),
+                Active = group.Count(user => user.IsActive),
+                Locked = group.Count(user => !user.IsActive),
+                New = group.Count(user => user.CreatedAt >= since)
+            }).SingleOrDefaultAsync(ct);
+        var logins = await _db.LoginLogs.AsNoTracking().Where(log => log.CreatedAt >= since)
+            .GroupBy(_ => 1).Select(group => new
+            {
+                Success = group.Count(log => log.Status == "SUCCESS"),
+                Failed = group.Count(log => log.Status == "FAILED")
+            }).SingleOrDefaultAsync(ct);
+        return Ok(new
+        {
+            totalUsers = users?.Total ?? 0,
+            totalActive = users?.Active ?? 0,
+            totalLocked = users?.Locked ?? 0,
+            last7Days = new { successLogins = logins?.Success ?? 0, failedLogins = logins?.Failed ?? 0, newRegistrations = users?.New ?? 0 }
+        });
+    }
 
     [Authorize(Roles = AppRoles.Admin)]
     [HttpGet("admin/logs")]
