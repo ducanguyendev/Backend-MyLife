@@ -84,6 +84,9 @@ builder.Services.AddHttpClient(nameof(GoogleAvatarSyncService), client => client
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddScoped<ITokenService, TokenService>();
 builder.Services.AddScoped<IGoogleCredentialVerifier, GoogleCredentialVerifier>();
+builder.Services.Configure<SmtpOptions>(builder.Configuration.GetSection("Smtp"));
+builder.Services.Configure<PasswordResetOptions>(builder.Configuration.GetSection("PasswordReset"));
+builder.Services.AddScoped<IEmailSender, SmtpEmailSender>();
 builder.Services.AddScoped<IGoogleDriveAvatarService, GoogleDriveAvatarService>();
 builder.Services.AddScoped<IGoogleAvatarSyncService, GoogleAvatarSyncService>();
 builder.Services.AddScoped<IFamilyTreeService, FamilyTreeService>();

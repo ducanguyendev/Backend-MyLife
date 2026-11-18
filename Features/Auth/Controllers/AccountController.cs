@@ -6,7 +6,10 @@ using Google.Apis.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using MyLife.Features.Auth.Models;
 using MyLife.Features.Auth.Services;
 using MyLife.Features.Avatar.Services;
@@ -15,7 +18,6 @@ using MyLife.Shared.Data;
 using MyLife.Shared.Entities;
 using MyLife.Shared.Security;
 using MyLife.Shared.Web;
-using Microsoft.AspNetCore.RateLimiting;
 using AppUser = MyLife.Shared.Entities.User;
 
 namespace MyLife.Features.Auth.Controllers;
@@ -28,11 +30,13 @@ public sealed class AccountController : ControllerBase
     private readonly ITokenService _tokens;
     private readonly IGoogleCredentialVerifier _googleCredentials;
     private readonly IGoogleAvatarSyncService _googleAvatars;
+    private readonly IEmailSender _emailSender;
+    private readonly PasswordResetOptions _resetOptions;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AccountController> _logger;
 
-    public AccountController(AppDbContext db, ITokenService tokens, IGoogleCredentialVerifier googleCredentials, IGoogleAvatarSyncService googleAvatars, IConfiguration configuration, ILogger<AccountController> logger)
-        => (_db, _tokens, _googleCredentials, _googleAvatars, _configuration, _logger) = (db, tokens, googleCredentials, googleAvatars, configuration, logger);
+    public AccountController(AppDbContext db, ITokenService tokens, IGoogleCredentialVerifier googleCredentials, IGoogleAvatarSyncService googleAvatars, IEmailSender emailSender, IOptions<PasswordResetOptions> resetOptions, IConfiguration configuration, ILogger<AccountController> logger)
+        => (_db, _tokens, _googleCredentials, _googleAvatars, _emailSender, _resetOptions, _configuration, _logger) = (db, tokens, googleCredentials, googleAvatars, emailSender, resetOptions.Value, configuration, logger);
 
     [EnableRateLimiting(WebRateLimits.Auth)]
     [HttpPost("login")]
@@ -77,6 +81,88 @@ public sealed class AccountController : ControllerBase
         await LogLoginAsync(user, email, "SUCCESS"); await _db.SaveChangesAsync();
         return StatusCode(StatusCodes.Status201Created, new { success = true, message = "Registration completed.", email });
     }
+
+    // Anti-enumeration: always returns the same success response, whether or
+    // not an account exists for the email. The reset link goes to the web reset
+    // page, which serves web and mobile users alike.
+    [EnableRateLimiting(WebRateLimits.Auth)]
+    [HttpPost("auth/forgot-password")]
+    public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest request)
+    {
+        if (!ModelState.IsValid) return ValidationProblem(ModelState);
+        var email = NormalizeEmail(request.Email);
+        var user = await _db.Users.SingleOrDefaultAsync(x => x.Email == email);
+        if (user is { IsActive: true, HasLocalProvider: true })
+        {
+            var rawToken = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+            var resetUrl = $"{_resetOptions.ResetUrlBase.TrimEnd('/')}/reset-password?token={Uri.EscapeDataString(rawToken)}";
+            try
+            {
+                await _emailSender.SendAsync(user.Email, "Đặt lại mật khẩu MyLife",
+                    BuildResetEmailHtml(resetUrl, _resetOptions.TokenLifetimeMinutes),
+                    BuildResetEmailText(resetUrl, _resetOptions.TokenLifetimeMinutes),
+                    HttpContext.RequestAborted);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.LogError(ex, "Password reset email could not be sent because SMTP is not configured.");
+                return StatusCode(500, Error("AUTH_SMTP_NOT_CONFIGURED", "Password reset is not available. Please contact support."));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Password reset email could not be sent.");
+                return StatusCode(500, Error("AUTH_EMAIL_SEND_FAILED", "The reset email could not be sent. Please try again later."));
+            }
+            var previous = await _db.PasswordResetTokens.Where(x => x.UserId == user.Id && x.UsedAt == null).ToListAsync();
+            _db.PasswordResetTokens.RemoveRange(previous);
+            _db.PasswordResetTokens.Add(new PasswordResetToken
+            {
+                UserId = user.Id,
+                TokenHash = HashResetToken(rawToken),
+                ExpiresAt = DateTime.UtcNow.AddMinutes(_resetOptions.TokenLifetimeMinutes),
+                CreatedAt = DateTime.UtcNow,
+            });
+            await _db.SaveChangesAsync();
+        }
+        return Ok(new { success = true, message = "If an account exists for this email, a password reset link has been sent." });
+    }
+
+    [EnableRateLimiting(WebRateLimits.Auth)]
+    [HttpPost("auth/reset-password")]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest request)
+    {
+        if (!ModelState.IsValid) return ValidationProblem(ModelState);
+        if (request.NewPassword != request.ConfirmPassword) return BadRequest(Error("AUTH_PASSWORD_MISMATCH", "Passwords do not match."));
+        if (Encoding.UTF8.GetByteCount(request.NewPassword) > 72) return BadRequest(Error("AUTH_PASSWORD_TOO_LONG", "Password must not exceed 72 UTF-8 bytes."));
+        var now = DateTime.UtcNow;
+        var tokenHash = HashResetToken(request.Token.Trim());
+        var record = await _db.PasswordResetTokens.Include(x => x.User)
+            .SingleOrDefaultAsync(x => x.TokenHash == tokenHash && x.UsedAt == null && x.ExpiresAt > now);
+        // Expired, used and unknown tokens all get the same response.
+        if (record is null || !record.User.IsActive || !record.User.HasLocalProvider)
+            return BadRequest(Error("AUTH_RESET_TOKEN_INVALID", "The reset link is invalid or has expired."));
+        record.UsedAt = now;
+        record.User.PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.NewPassword, workFactor: 11);
+        record.User.UpdatedAt = now;
+        var sessions = await _db.RefreshTokens.Where(x => x.UserId == record.UserId && !x.IsRevoked).ToListAsync();
+        foreach (var session in sessions) session.IsRevoked = true;
+        await _db.SaveChangesAsync();
+        return Ok(new { success = true, message = "Your password has been reset. You can now sign in with your new password." });
+    }
+
+    private static string BuildResetEmailHtml(string resetUrl, int lifetimeMinutes) => $"""
+        <p>Bạn đã yêu cầu đặt lại mật khẩu cho tài khoản MyLife.</p>
+        <p><a href="{resetUrl}">Đặt lại mật khẩu</a></p>
+        <p>Liên kết này hết hạn sau {lifetimeMinutes} phút và chỉ dùng được một lần. Nếu bạn không yêu cầu đặt lại mật khẩu, hãy bỏ qua email này.</p>
+        """;
+
+    private static string BuildResetEmailText(string resetUrl, int lifetimeMinutes) => $"""
+        Bạn đã yêu cầu đặt lại mật khẩu cho tài khoản MyLife.
+
+        Đặt lại mật khẩu tại: {resetUrl}
+
+        Liên kết này hết hạn sau {lifetimeMinutes} phút và chỉ dùng được một lần. Nếu bạn không yêu cầu đặt lại mật khẩu, hãy bỏ qua email này.
+        """;
 
     [EnableRateLimiting(WebRateLimits.Auth)]
     [HttpPost("auth/google")]
@@ -319,6 +405,7 @@ public sealed class AccountController : ControllerBase
     private static string NormalizeEmail(string? value) => (value ?? string.Empty).Trim().ToLowerInvariant();
     private static string PrimaryRole(AppUser user) => user.UserRoles.Any(x => x.Role.Name == AppRoles.Admin) ? AppRoles.Admin : AppRoles.User;
     private static string HashRefreshToken(string raw) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)));
+    private static string HashResetToken(string raw) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)));
     private static object Error(string message) => new { success = false, message };
     private static object Error(string code, string message) => new { success = false, code, message };
     private int AccessSeconds => _configuration.GetValue<int>("JwtSettings:AccessTokenSeconds"); private int RefreshMinutes => _configuration.GetValue<int>("JwtSettings:RefreshTokenMinutes");

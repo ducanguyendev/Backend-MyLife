@@ -976,3 +976,39 @@ Swagger:
 ```text
 http://localhost:5274/swagger
 ```
+
+---
+
+# 33. Quên mật khẩu (SMTP)
+
+Luồng quên mật khẩu gồm 2 endpoint:
+
+- `POST /api/auth/forgot-password` — nhận email, gửi link đặt lại (luôn trả về thành công chung chung kể cả khi email không tồn tại).
+- `POST /api/auth/reset-password` — nhận token + mật khẩu mới, đổi mật khẩu và thu hồi toàn bộ session (refresh token) của tài khoản.
+
+Token đặt lại: sinh ngẫu nhiên 32 byte, chỉ lưu hash SHA-256 trong bảng `password_reset_tokens`, hết hạn sau 60 phút (mặc định), dùng 1 lần. Link trong email trỏ về trang web `/reset-password?token=...` (dùng chung cho web và app).
+
+## Cấu hình SMTP
+
+Email gửi qua SMTP bằng MailKit. Cấu hình trong user secrets (không commit secret vào `appsettings.json`):
+
+```powershell
+dotnet user-secrets set "Smtp:Host" "smtp.gmail.com"
+dotnet user-secrets set "Smtp:Port" "587"
+dotnet user-secrets set "Smtp:Username" "your-email@gmail.com"
+dotnet user-secrets set "Smtp:Password" "YOUR_GMAIL_APP_PASSWORD"
+dotnet user-secrets set "Smtp:From" "your-email@gmail.com"
+dotnet user-secrets set "Smtp:FromName" "MyLife"
+dotnet user-secrets set "Smtp:EnableSsl" "true"
+```
+
+Với Gmail, `Smtp:Password` là **mật khẩu ứng dụng** (App Password), không phải mật khẩu tài khoản Google: bật xác minh 2 bước cho tài khoản, rồi tạo App Password tại Google Account → Security → App passwords.
+
+Đổi địa chỉ web nhận link đặt lại (mặc định `http://localhost:7000`) và thời hạn token:
+
+```powershell
+dotnet user-secrets set "PasswordReset:ResetUrlBase" "https://your-domain"
+dotnet user-secrets set "PasswordReset:TokenLifetimeMinutes" "60"
+```
+
+Nếu SMTP chưa được cấu hình, endpoint quên mật khẩu trả về lỗi 500 (`AUTH_SMTP_NOT_CONFIGURED`) và ghi log — không lặng lẽ báo thành công giả.
